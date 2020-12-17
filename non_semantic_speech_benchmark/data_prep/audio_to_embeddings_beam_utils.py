@@ -19,6 +19,9 @@ r"""Construct a beam pipeline to map from audio to embeddings.
 This file has two modes:
 1) Map from tf.Examples of audio to tf.Examples of embeddings.
 2) Map from TFDS dataseet to tf.Examples of embeddings.
+
+It supports using a tf.hub module OR a TFLite model file to generate embeddings.
+TFLite file should have the `.tflite` extension.
 """
 
 import copy
@@ -52,11 +55,41 @@ def _tfexample_audio_to_npfloat32(ex, audio_key):
   return audio
 
 
-def _samples_to_embedding(audio_samples, sample_rate, mod, output_key):
+def _samples_to_embedding_tfhub(audio_samples, sample_rate, mod, output_key):
   """Run inference to map audio samples to an embedding."""
   tf_out = mod(tf.constant(audio_samples, tf.float32),
                tf.constant(sample_rate, tf.int32))
   return np.array(tf_out[output_key])
+
+
+def _build_tflite_interpreter(tflite_model_path):
+  model_content = None
+  with tf.io.gfile.GFile(tflite_model_path, 'rb') as model_file:
+    model_content = model_file.read()
+  interpreter = tf.lite.Interpreter(model_content=model_content)
+  interpreter.allocate_tensors()
+  return interpreter
+
+
+def _samples_to_embedding_tflite(
+    audio_samples, sample_rate, interpreter, output_key):
+  """Run TFLite inference to map audio samples to an embedding."""
+  input_details = interpreter.get_input_details()
+  output_details = interpreter.get_output_details()
+  # Resize TFLite input size based on length of sample.
+  # Ideally, we should explore if we can use fixed-size input here, and
+  # tile the sample to meet TFLite input size.
+  interpreter.resize_tensor_input(input_details[0]['index'],
+                                  [len(audio_samples)])
+  interpreter.allocate_tensors()
+  interpreter.set_tensor(input_details[0]['index'], audio_samples)
+  interpreter.set_tensor(input_details[1]['index'],
+                         np.array(sample_rate).astype(np.int32))
+
+  interpreter.invoke()
+  embedding_2d = interpreter.get_tensor(
+      output_details[int(output_key)]['index'])
+  return np.array(embedding_2d, dtype=np.float32)
 
 
 @beam.typehints.with_input_types(typing.Tuple[str, typing.Any])
@@ -67,36 +100,51 @@ class ComputeEmbeddingMapFn(beam.DoFn):
   def __init__(self, name, module, output_key, audio_key, sample_rate_key,
                sample_rate, average_over_time):
     self._name = name
+    # If TFLite should be used, `module` should point to a flatbuffer model.
     self._module = module
+    self._use_tflite = self._module.endswith('.tflite')
+    # For TFLite, `output_key` is the index of the embedding output from TFLite
+    # model (Usually 0).
     self._output_key = output_key
     self._audio_key = audio_key
     self._sample_rate_key = sample_rate_key
     self._sample_rate = sample_rate
     self._average_over_time = average_over_time
 
-  def setup(self):
-    self.module = hub.load(self._module)
-
-  def process(self, k_v):
-    k, ex = k_v
-
     # Only one of `sample_rate_key` and `sample_rate` should be not None.
     assert (self._sample_rate_key is None) ^ (self._sample_rate is None),\
         (self._sample_rate_key, self._sample_rate)
 
+  def setup(self):
+    if self._use_tflite:
+      self.interpreter = _build_tflite_interpreter(self._module)
+    else:
+      self.module = hub.load(self._module)
+
+  def process(self, k_v):
+    k, ex = k_v
+
     # Read the input example audio and assert input format sanity.
-    assert self._audio_key in ex.features.feature, ex.features.feature.keys()
+    if self._audio_key not in ex.features.feature:
+      raise ValueError(f'Audio key `{self._audio_key}` not found: '
+                       f'{list(ex.features.feature.keys())}')
     audio = _tfexample_audio_to_npfloat32(ex, self._audio_key)
-    assert audio.size > 0, k
+    if audio.size == 0:
+      raise ValueError(f'No audio found: {self._audio_key}, {audio.size} {k}')
     beam.metrics.Metrics.distribution(
         'computed-embedding-audio', 'length').update(audio.size)
 
     # Read the sample rate, if a key to do so has been provided.
-    sample_rate = self._sample_rate
     if self._sample_rate_key:
-      assert self._sample_rate_key in ex.features.feature
+      if self._sample_rate_key not in ex.features.feature:
+        raise ValueError(f'Sample rate key not found: {self._sample_rate_key}')
       sample_rate = ex.features.feature[
           self._sample_rate_key].int64_list.value[0]
+    else:
+      if not self._sample_rate:
+        raise ValueError('If `sample_rate_key` not provided, must provide '
+                         '`sample_rate`.')
+      sample_rate = self._sample_rate
     logging.info(
         'len(audio): %s / %s / %s', len(audio), sample_rate, self._name)
 
@@ -107,8 +155,12 @@ class ComputeEmbeddingMapFn(beam.DoFn):
       sample_rate = 16000
 
     # Calculate the 2D embedding.
-    embedding_2d = _samples_to_embedding(
-        audio, sample_rate, self.module, self._output_key)
+    if self._use_tflite:
+      embedding_2d = _samples_to_embedding_tflite(
+          audio, sample_rate, self.interpreter, self._output_key)
+    else:
+      embedding_2d = _samples_to_embedding_tfhub(
+          audio, sample_rate, self.module, self._output_key)
     assert isinstance(embedding_2d, np.ndarray)
     assert embedding_2d.ndim == 2
     assert embedding_2d.dtype == np.float32
@@ -181,19 +233,21 @@ def _add_embedding_column_map_fn(k_v, original_example_key,
   return k, ex
 
 
-def _tfds_filenames(dataset_name, split_name):
+def _tfds_filenames(dataset_name, split_name, data_dir=None):
   """Returns filenames for a TFDS dataset."""
-  data_dir = tfds.builder(dataset_name).data_dir
+  data_dir = tfds.builder(dataset_name, data_dir=data_dir).data_dir
   return [os.path.join(data_dir, x) for x in
           tfds.builder(dataset_name).info.splits[split_name].filenames]
 
 
-def _tfds_sample_rate(dataset_name):
-  return tfds.builder(dataset_name).info.features['audio'].sample_rate
+def _tfds_sample_rate(dataset_name, data_dir=None):
+  return tfds.builder(dataset_name, data_dir=data_dir).info.features[
+      'audio'].sample_rate
 
 
 def read_input_glob_and_sample_rate_from_flags(
-    input_glob_flag, sample_rate_flag, tfds_dataset_flag, output_filename_flag):
+    input_glob_flag, sample_rate_flag, tfds_dataset_flag, output_filename_flag,
+    tfds_data_dir_flag):
   """Read flags for input data and sample rate.
 
   Args:
@@ -201,6 +255,7 @@ def read_input_glob_and_sample_rate_from_flags(
     sample_rate_flag: String flag. The sample rate.
     tfds_dataset_flag: String flag. The TFDS dataset.
     output_filename_flag: String flag. The output filename.
+    tfds_data_dir_flag: String flag. Optional location of local TFDS data.
 
   Returns:
     (input_filenames, output_filenames, sample_rate)
@@ -209,20 +264,23 @@ def read_input_glob_and_sample_rate_from_flags(
   """
   if input_glob_flag:
     assert file_utils.Glob(input_glob_flag), input_glob_flag
+    assert not tfds_data_dir_flag
     input_filenames = [file_utils.Glob(input_glob_flag)]
     output_filenames = [output_filename_flag]
     sample_rate = sample_rate_flag
   else:
     assert tfds_dataset_flag
     dataset_name = tfds_dataset_flag
-    tfds.load(dataset_name)  # download dataset, if necessary.
-    sample_rate = _tfds_sample_rate(dataset_name)
+    # Download dataset, if necessary.
+    tfds.load(dataset_name, data_dir=tfds_data_dir_flag)
+    sample_rate = _tfds_sample_rate(dataset_name, tfds_data_dir_flag)
     assert sample_rate, sample_rate
 
     input_filenames = []
     output_filenames = []
     for split_name in ('train', 'validation', 'test'):
-      input_filenames.append(_tfds_filenames(dataset_name, split_name))
+      input_filenames.append(
+          _tfds_filenames(dataset_name, split_name, tfds_data_dir_flag))
       output_filenames.append(output_filename_flag + f'.{split_name}')
 
     logging.info('TFDS input filenames: %s', input_filenames)

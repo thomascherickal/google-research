@@ -21,9 +21,9 @@ from absl import flags
 import tensorflow.compat.v1 as tf
 import tf_slim
 
+from poem.core import data_utils
 from poem.core import keypoint_utils
 from poem.core import loss_utils
-from poem.core import models
 from poem.core import pipeline_utils
 
 FLAGS = flags.FLAGS
@@ -65,6 +65,9 @@ flags.DEFINE_integer(
 flags.DEFINE_integer('num_embedding_samples', 20,
                      'Number of samples from embedding distributions.')
 
+# See `common_module.SUPPORTED_BASE_MODEL_TYPES`.
+flags.DEFINE_string('base_model_type', 'SIMPLE', 'Type of base model.')
+
 flags.DEFINE_integer('num_fc_blocks', 2, 'Number of fully connected blocks.')
 
 flags.DEFINE_integer('num_fcs_per_block', 2,
@@ -93,7 +96,8 @@ flags.DEFINE_string(
 flags.DEFINE_float(
     'min_negative_keypoint_mpjpe', 0.1,
     'Minimum MPJPE gap for two poses to be considered as negative match. Only'
-    ' used if `keypoint_distance_type` is `MPJPE`.')
+    ' used if `keypoint_distance_type` is `MPJPE`. If negative, uses all other '
+    'samples as negative matches.')
 
 # See `common_module.SUPPORTED_DISTANCE_TYPES`.
 flags.DEFINE_string('triplet_distance_type', 'SAMPLE',
@@ -115,6 +119,12 @@ flags.DEFINE_string(
     'Component-wise reducer to use in triplet loss computation.')
 
 flags.DEFINE_float('triplet_loss_margin', 0.69314718056, 'Triplet loss margin.')
+
+flags.DEFINE_bool(
+    'use_inferred_keypoint_masks_for_triplet_label', False,
+    'Whether to infer 3D keypoint masks from input 2D keypoint masks and apply'
+    'them to compute triplet labels. If True, surjective mapping is required '
+    'from input 2D keypoint profile to 3D keypoint profile.')
 
 flags.DEFINE_bool(
     'use_normalized_embeddings_for_triplet_loss', False,
@@ -262,8 +272,8 @@ flags.DEFINE_integer(
 flags.DEFINE_integer('task', 0, 'Task replica identifier for training.')
 
 
-def _validate_and_setup(common_module, keypoint_profiles_module,
-                        keypoint_distance_config_override):
+def _validate_and_setup(common_module, keypoint_profiles_module, models_module,
+                        keypoint_distance_config_override, embedder_fn_kwargs):
   """Validates and sets up training configurations."""
   # Set default values for unspecified flags.
   if FLAGS.use_normalized_embeddings_for_triplet_mining is None:
@@ -288,6 +298,7 @@ def _validate_and_setup(common_module, keypoint_profiles_module,
   validate_flag(FLAGS.model_input_keypoint_type,
                 common_module.SUPPORTED_TRAINING_MODEL_INPUT_KEYPOINT_TYPES)
   validate_flag(FLAGS.embedding_type, common_module.SUPPORTED_EMBEDDING_TYPES)
+  validate_flag(FLAGS.base_model_type, common_module.SUPPORTED_BASE_MODEL_TYPES)
   validate_flag(FLAGS.keypoint_distance_type,
                 common_module.SUPPORTED_KEYPOINT_DISTANCE_TYPES)
   validate_flag(FLAGS.triplet_distance_type,
@@ -352,17 +363,31 @@ def _validate_and_setup(common_module, keypoint_profiles_module,
         'kernel and `NEG_LOG_MEAN` or `LOWER_HALF_NEG_LOG_MEAN` parwise reducer'
         ' in pairs.')
 
+  keypoint_profile_2d = keypoint_profiles_module.create_keypoint_profile_or_die(
+      FLAGS.input_keypoint_profile_name_2d)
+
   # Set up configurations.
   configs = {
       'keypoint_profile_3d':
           keypoint_profiles_module.create_keypoint_profile_or_die(
               FLAGS.input_keypoint_profile_name_3d),
       'keypoint_profile_2d':
-          keypoint_profiles_module.create_keypoint_profile_or_die(
-              FLAGS.input_keypoint_profile_name_2d),
-      'target_keypoint_profile_3d':
-          keypoint_profiles_module.create_keypoint_profile_or_die(
-              FLAGS.input_keypoint_profile_name_3d),
+          keypoint_profile_2d,
+      'embedder_fn':
+          models_module.get_embedder(
+              base_model_type=FLAGS.base_model_type,
+              embedding_type=FLAGS.embedding_type,
+              num_embedding_components=FLAGS.num_embedding_components,
+              embedding_size=FLAGS.embedding_size,
+              num_embedding_samples=FLAGS.num_embedding_samples,
+              is_training=True,
+              num_fc_blocks=FLAGS.num_fc_blocks,
+              num_fcs_per_block=FLAGS.num_fcs_per_block,
+              num_hidden_nodes=FLAGS.num_hidden_nodes,
+              num_bottleneck_nodes=FLAGS.num_bottleneck_nodes,
+              weight_max_norm=FLAGS.weight_max_norm,
+              dropout_rate=FLAGS.dropout_rate,
+              **embedder_fn_kwargs),
       'triplet_embedding_keys':
           pipeline_utils.get_embedding_keys(
               FLAGS.triplet_distance_type, common_module=common_module),
@@ -448,8 +473,9 @@ def _validate_and_setup(common_module, keypoint_profiles_module,
 
 
 def run(master, input_dataset_class, common_module, keypoint_profiles_module,
-        tfe_parser_creator, keypoint_preprocessor_3d, create_model_input_fn,
-        keypoint_distance_config_override):
+        models_module, input_example_parser_creator, keypoint_preprocessor_3d,
+        create_model_input_fn, keypoint_distance_config_override,
+        embedder_fn_kwargs):
   """Runs training pipeline.
 
   Args:
@@ -457,26 +483,31 @@ def run(master, input_dataset_class, common_module, keypoint_profiles_module,
     input_dataset_class: An input dataset class that matches input table type.
     common_module: A Python module that defines common flags and constants.
     keypoint_profiles_module: A Python module that defines keypoint profiles.
-    tfe_parser_creator: A function handle for creating tf.Example parser
+    models_module: A Python module that defines base model architectures.
+    input_example_parser_creator: A function handle for creating data parser
       function. If None, uses the default parser creator.
     keypoint_preprocessor_3d: A function handle for preprocessing raw 3D
       keypoints.
     create_model_input_fn: A function handle for creating model inputs.
     keypoint_distance_config_override: A dictionary for keypoint distance
       configuration to override the defaults. Ignored if empty.
+    embedder_fn_kwargs: A dictionary of additional kwargs for creating the
+      embedder function.
   """
   configs = _validate_and_setup(
       common_module=common_module,
       keypoint_profiles_module=keypoint_profiles_module,
-      keypoint_distance_config_override=keypoint_distance_config_override)
+      models_module=models_module,
+      keypoint_distance_config_override=keypoint_distance_config_override,
+      embedder_fn_kwargs=embedder_fn_kwargs)
 
   g = tf.Graph()
   with g.as_default():
     with tf.device(tf.train.replica_device_setter(FLAGS.num_ps_tasks)):
 
       def create_inputs():
-        """Create pipeline and model inputs."""
-        inputs = pipeline_utils.read_batch_from_tfe_tables(
+        """Creates pipeline and model inputs."""
+        inputs = pipeline_utils.read_batch_from_dataset_tables(
             FLAGS.input_table,
             batch_sizes=[int(x) for x in FLAGS.batch_size],
             num_instances_per_record=2,
@@ -488,7 +519,7 @@ def run(master, input_dataset_class, common_module, keypoint_profiles_module,
             shuffle_buffer_size=FLAGS.input_shuffle_buffer_size,
             common_module=common_module,
             dataset_class=input_dataset_class,
-            tfe_parser_creator=tfe_parser_creator)
+            input_example_parser_creator=input_example_parser_creator)
 
         (inputs[common_module.KEY_KEYPOINTS_3D],
          keypoint_preprocessor_side_outputs_3d) = keypoint_preprocessor_3d(
@@ -497,7 +528,7 @@ def run(master, input_dataset_class, common_module, keypoint_profiles_module,
              normalize_keypoints_3d=True)
         inputs.update(keypoint_preprocessor_side_outputs_3d)
 
-        inputs['model_inputs'], _ = create_model_input_fn(
+        inputs['model_inputs'], side_inputs = create_model_input_fn(
             inputs[common_module.KEY_KEYPOINTS_2D],
             inputs[common_module.KEY_KEYPOINT_MASKS_2D],
             inputs[common_module.KEY_KEYPOINTS_3D],
@@ -508,22 +539,11 @@ def run(master, input_dataset_class, common_module, keypoint_profiles_module,
             azimuth_range=configs['random_projection_azimuth_range'],
             elevation_range=configs['random_projection_elevation_range'],
             roll_range=configs['random_projection_roll_range'])
+        data_utils.merge_dict(side_inputs, inputs)
         return inputs
 
       inputs = create_inputs()
-      outputs, _ = models.embed(
-          inputs['model_inputs'],
-          embedding_type=FLAGS.embedding_type,
-          num_embedding_components=FLAGS.num_embedding_components,
-          embedding_size=FLAGS.embedding_size,
-          num_embedding_samples=FLAGS.num_embedding_samples,
-          is_training=True,
-          num_fc_blocks=FLAGS.num_fc_blocks,
-          num_fcs_per_block=FLAGS.num_fcs_per_block,
-          num_hidden_nodes=FLAGS.num_hidden_nodes,
-          num_bottleneck_nodes=FLAGS.num_bottleneck_nodes,
-          weight_max_norm=FLAGS.weight_max_norm,
-          dropout_rate=FLAGS.dropout_rate)
+      outputs, _ = configs['embedder_fn'](inputs['model_inputs'])
       summaries = {
           'train/batch_size':
               tf.shape(outputs[common_module.KEY_EMBEDDING_MEANS])[0]
@@ -531,17 +551,25 @@ def run(master, input_dataset_class, common_module, keypoint_profiles_module,
 
       def add_triplet_loss():
         """Adds triplet loss."""
-        anchor_keypoints_3d = tf.unstack(
-            inputs[common_module.KEY_KEYPOINTS_3D], num=2, axis=1)[0]
-        if (configs['keypoint_profile_3d'].keypoint_names !=
-            configs['target_keypoint_profile_3d'].keypoint_names):
-          # Select target keypoints to use if they are different than input.
-          anchor_keypoints_3d, _ = keypoint_utils.select_keypoints_by_name(
-              anchor_keypoints_3d,
-              input_keypoint_names=(
-                  configs['keypoint_profile_3d'].keypoint_names),
-              output_keypoint_names=(
-                  configs['target_keypoint_profile_3d'].keypoint_names))
+        anchor_keypoints_3d, positive_keypoints_3d = tf.unstack(
+            inputs[common_module.KEY_KEYPOINTS_3D], num=2, axis=1)
+
+        anchor_keypoint_masks_3d, positive_keypoint_masks_3d = None, None
+        if FLAGS.use_inferred_keypoint_masks_for_triplet_label:
+          anchor_keypoint_masks_2d, positive_keypoint_masks_2d = tf.unstack(
+              inputs[common_module.KEY_PREPROCESSED_KEYPOINT_MASKS_2D],
+              num=2,
+              axis=1)
+          anchor_keypoint_masks_3d = keypoint_utils.transfer_keypoint_masks(
+              anchor_keypoint_masks_2d,
+              input_keypoint_profile=configs['keypoint_profile_2d'],
+              output_keypoint_profile=configs['keypoint_profile_3d'],
+              enforce_surjectivity=True)
+          positive_keypoint_masks_3d = keypoint_utils.transfer_keypoint_masks(
+              positive_keypoint_masks_2d,
+              input_keypoint_profile=configs['keypoint_profile_2d'],
+              output_keypoint_profile=configs['keypoint_profile_3d'],
+              enforce_surjectivity=True)
 
         triplet_anchor_embeddings, triplet_positive_embeddings = tf.unstack(
             pipeline_utils.stack_embeddings(outputs,
@@ -568,21 +596,23 @@ def run(master, input_dataset_class, common_module, keypoint_profiles_module,
             loss_utils.compute_keypoint_triplet_losses(
                 anchor_embeddings=triplet_anchor_embeddings,
                 positive_embeddings=triplet_positive_embeddings,
-                match_embeddings=triplet_anchor_embeddings,
+                match_embeddings=triplet_positive_embeddings,
                 anchor_keypoints=anchor_keypoints_3d,
-                match_keypoints=anchor_keypoints_3d,
+                match_keypoints=positive_keypoints_3d,
                 margin=FLAGS.triplet_loss_margin,
                 min_negative_keypoint_distance=(
                     configs['min_negative_keypoint_distance']),
                 use_semi_hard=FLAGS.use_semi_hard_triplet_negatives,
                 exclude_inactive_triplet_loss=(
                     FLAGS.exclude_inactive_triplet_loss),
+                anchor_keypoint_masks=anchor_keypoint_masks_3d,
+                match_keypoint_masks=positive_keypoint_masks_3d,
                 embedding_sample_distance_fn=(
                     configs['triplet_embedding_sample_distance_fn']),
                 keypoint_distance_fn=configs['keypoint_distance_fn'],
                 anchor_mining_embeddings=triplet_anchor_mining_embeddings,
                 positive_mining_embeddings=triplet_positive_mining_embeddings,
-                match_mining_embeddings=triplet_anchor_mining_embeddings,
+                match_mining_embeddings=triplet_positive_mining_embeddings,
                 summarize_percentiles=FLAGS.summarize_percentiles))
         tf.losses.add_loss(triplet_loss, loss_collection=tf.GraphKeys.LOSSES)
         summaries.update(triplet_loss_summaries)

@@ -15,12 +15,12 @@
 
 """Tests for kws_streaming.layers.gru."""
 
-import random as rn
 import numpy as np
 from kws_streaming.layers import gru
+from kws_streaming.layers import modes
+from kws_streaming.layers import test_utils
 from kws_streaming.layers.compat import tf
 from kws_streaming.layers.compat import tf1
-from kws_streaming.layers.modes import Modes
 tf1.disable_eager_execution()
 
 
@@ -28,11 +28,7 @@ class GRUTest(tf.test.TestCase):
 
   def setUp(self):
     super(GRUTest, self).setUp()
-
-    seed = 123
-    np.random.seed(seed)
-    rn.seed(seed)
-    tf.random.set_seed(seed)
+    test_utils.set_seed(123)
 
     # generate input signal
     self.inference_batch_size = 1
@@ -52,7 +48,7 @@ class GRUTest(tf.test.TestCase):
 
   def test_streaming_inference_internal_state(self):
     # create streaming inference model with internal state
-    mode = Modes.STREAM_INTERNAL_STATE_INFERENCE
+    mode = modes.Modes.STREAM_INTERNAL_STATE_INFERENCE
     inputs = tf.keras.layers.Input(
         shape=(1, self.feature_size),
         batch_size=self.inference_batch_size,
@@ -75,7 +71,7 @@ class GRUTest(tf.test.TestCase):
 
   def test__streaming_inference_external_state(self):
     # create streaming inference model with external state
-    mode = Modes.STREAM_EXTERNAL_STATE_INFERENCE
+    mode = modes.Modes.STREAM_EXTERNAL_STATE_INFERENCE
     inputs = tf.keras.layers.Input(
         shape=(1, self.feature_size),
         batch_size=self.inference_batch_size,

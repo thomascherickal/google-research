@@ -23,6 +23,7 @@ from . import preprocessors
 
 import t5.data
 from t5.data import postprocessors as t5_postprocessors
+from t5.data import preprocessors as t5_preprocessors
 from t5.evaluation import metrics as t5_metrics
 
 MixtureRegistry = t5.data.MixtureRegistry
@@ -30,6 +31,7 @@ TaskRegistry = t5.data.TaskRegistry
 TfdsTask = t5.data.TfdsTask
 
 DEFAULT_SPM_PATH = "gs://t5-data/vocabs/cc_all.32000/sentencepiece.model"  # GCS
+
 
 # ========================== Natural Questions =================================
 
@@ -55,7 +57,6 @@ TaskRegistry.add(
     },
     text_preprocessor=preprocessors.natural_questions_nocontext,
     postprocess_fn=postprocessors.natural_questions,
-    sentencepiece_model_path=DEFAULT_SPM_PATH,
     metric_fns=[
         functools.partial(
             metrics.natural_questions,
@@ -70,7 +71,6 @@ TaskRegistry.add(
     tfds_name="natural_questions:0.0.2",
     text_preprocessor=preprocessors.natural_questions_nocontext,
     postprocess_fn=postprocessors.natural_questions,
-    sentencepiece_model_path=DEFAULT_SPM_PATH,
     metric_fns=[metrics.natural_questions])
 
 
@@ -86,13 +86,12 @@ TaskRegistry.add(
     TfdsTask,
     tfds_name="natural_questions_open:1.0.0",
     splits={
-        "train": "train[:79168]",
-        "validation": "train[79168:]",
+        "train": "train[:79168]",  # ~90%, matches numbers used by ORQA
+        "validation": "train[79168:]",   # ~10%, matches numbers used by ORQA
         "test": "validation"
     },
     text_preprocessor=preprocessors.natural_questions_open,
     postprocess_fn=t5_postprocessors.qa,
-    sentencepiece_model_path=DEFAULT_SPM_PATH,
     metric_fns=[t5_metrics.squad])
 # This is a slight variant of the previous task that selects a random answer
 # when multiple are provided instead of using the first.
@@ -109,7 +108,6 @@ TaskRegistry.add(
         preprocessors.natural_questions_open, preprocessors.sample_answer],
     supports_caching=False,  # Ensures we are sampling different answers.
     postprocess_fn=t5_postprocessors.qa,
-    sentencepiece_model_path=DEFAULT_SPM_PATH,
     metric_fns=[t5_metrics.squad])
 # This task uses full train split and reports metrics on the NQ validation split
 # (which is the test set in the open domain setting).
@@ -119,7 +117,6 @@ TaskRegistry.add(
     tfds_name="natural_questions_open:1.0.0",
     text_preprocessor=preprocessors.natural_questions_open,
     postprocess_fn=t5_postprocessors.qa,
-    sentencepiece_model_path=DEFAULT_SPM_PATH,
     metric_fns=[t5_metrics.squad])
 
 # ============================ Web Questions ===================================
@@ -135,7 +132,6 @@ TaskRegistry.add(
         "test": "test"
     },
     text_preprocessor=[preprocessors.web_questions_open],
-    sentencepiece_model_path=DEFAULT_SPM_PATH,
     postprocess_fn=t5_postprocessors.qa,
     metric_fns=[t5_metrics.squad],
 )
@@ -150,7 +146,6 @@ TaskRegistry.add(
         "validation": "test",
     },
     text_preprocessor=[preprocessors.web_questions_open],
-    sentencepiece_model_path=DEFAULT_SPM_PATH,
     postprocess_fn=t5_postprocessors.qa,
     metric_fns=[t5_metrics.squad],
 )
@@ -168,7 +163,6 @@ TaskRegistry.add(
     },
     text_preprocessor=preprocessors.trivia_qa_open,
     postprocess_fn=t5_postprocessors.qa,
-    sentencepiece_model_path=DEFAULT_SPM_PATH,
     metric_fns=[t5_metrics.trivia_qa])
 
 # This tasks trains on combined train and validation splits.
@@ -182,7 +176,6 @@ TaskRegistry.add(
         "test": "test"
     },
     postprocess_fn=t5_postprocessors.qa,
-    sentencepiece_model_path=DEFAULT_SPM_PATH,
     metric_fns=[t5_metrics.trivia_qa])
 
 
@@ -193,10 +186,11 @@ TaskRegistry.add(
 MixtureRegistry.add(
     "closed_book_qa",
     [
-        ("trivia_qa_open", 87622),
-        ("natural_questions_open", 85666),
-        ("web_questions_open", 3400)
-    ]
+        "trivia_qa_open",
+        "natural_questions_open",
+        "web_questions_open"
+    ],
+    default_rate=t5.data.rate_num_examples
 )
 
 # This mixture is to be used at test time. Training happens on the combined
@@ -204,8 +198,29 @@ MixtureRegistry.add(
 MixtureRegistry.add(
     "closed_book_qa_test",
     [
-        ("trivia_qa_open_test", 98935),
-        ("natural_questions_open_test", 87925),
-        ("web_questions_open_test", 3778)
-    ]
+        "trivia_qa_open_test",
+        "natural_questions_open_test",
+        "web_questions_open_test"
+    ],
+    default_rate=t5.data.rate_num_examples
 )
+
+# ========================= Salient Span Masking ===============================
+
+TaskRegistry.add(
+    "salient_span_masked_wikipedia",
+    TfdsTask,
+    tfds_name="salient_span_wikipedia/sentences:1.0.0",
+    text_preprocessor=preprocessors.mask_salient_spans,
+    metric_fns=[])
+
+TaskRegistry.add(
+    "span_corrupted_wikipedia",
+    TfdsTask,
+    tfds_name="salient_span_wikipedia/sentences:1.0.0",
+    text_preprocessor=functools.partial(
+        t5_preprocessors.rekey,
+        key_map={"inputs": None, "targets": "text"}),
+    token_preprocessor=t5_preprocessors.span_corruption,
+    metric_fns=[])
+

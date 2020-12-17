@@ -47,6 +47,7 @@ class Svdf(tf.keras.layers.Layer):
                use_batch_norm=False,
                bn_scale=False,
                pad='causal',
+               state_name_tag='ExternalState_',
                **kwargs):
     super(Svdf, self).__init__(**kwargs)
 
@@ -71,15 +72,16 @@ class Svdf(tf.keras.layers.Layer):
     self.pad = pad
     self.use_batch_norm = use_batch_norm
     self.bn_scale = bn_scale
+    self.state_name_tag = state_name_tag
 
   def build(self, input_shape):
     super(Svdf, self).build(input_shape)
 
     if self.mode == modes.Modes.TRAINING:
       self.dropout1 = non_scaling_dropout.NonScalingDropout(
-          self.dropout, training=True)
+          self.dropout)
     else:
-      self.dropout1 = tf.keras.layers.Lambda(lambda x: x)
+      self.dropout1 = tf.keras.layers.Lambda(lambda x, training: x)
     self.dense1 = tf.keras.layers.Dense(
         units=self.units1, use_bias=self.use_bias1)
     self.depth_cnn1 = depthwise_conv1d.DepthwiseConv1D(
@@ -87,16 +89,17 @@ class Svdf(tf.keras.layers.Layer):
         inference_batch_size=self.inference_batch_size,
         use_bias=self.use_bias,
         mode=self.mode,
-        pad=self.pad)
+        pad=self.pad,
+        state_name_tag=self.state_name_tag)
     if self.units2 > 0:
       self.dense2 = tf.keras.layers.Dense(units=self.units2, use_bias=True)
     else:
-      self.dense2 = tf.keras.layers.Lambda(lambda x: x)
+      self.dense2 = tf.keras.layers.Lambda(lambda x, training: x)
 
     if self.use_batch_norm:
       self.batch_norm = tf.keras.layers.BatchNormalization(scale=self.bn_scale)
     else:
-      self.batch_norm = tf.keras.layers.Lambda(lambda x: x)
+      self.batch_norm = tf.keras.layers.Lambda(lambda x, training: x)
 
   def compute_output_shape(self, input_shape):
     if input_shape.rank != 3:
@@ -110,11 +113,11 @@ class Svdf(tf.keras.layers.Layer):
     output_shape[-1] = self.units2
     return output_shape
 
-  def call(self, inputs):
-    output = self.dropout1(inputs)
+  def call(self, inputs, training=None):
+    output = self.dropout1(inputs, training=training)
     output = self.dense1(output)
     output = self.depth_cnn1(output)
-    output = self.batch_norm(output)
+    output = self.batch_norm(output, training=training)
     output = self.activation(output)
     output = self.dense2(output)
     return output
@@ -139,6 +142,7 @@ class Svdf(tf.keras.layers.Layer):
         'pad': self.pad,
         'use_batch_norm': self.use_batch_norm,
         'bn_scale': self.bn_scale,
+        'state_name_tag': self.state_name_tag,
     }
     base_config = super(Svdf, self).get_config()
     return dict(list(base_config.items()) + list(config.items()))

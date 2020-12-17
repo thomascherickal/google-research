@@ -14,16 +14,13 @@
 # limitations under the License.
 
 """Tests for spectrogram_augment."""
-import random
+
 import numpy as np
 from kws_streaming.layers import spectrogram_augment
+from kws_streaming.layers import test_utils
 from kws_streaming.layers.compat import tf
-
-
-def set_seed(seed):
-  random.seed(seed)
-  np.random.seed(seed)
-  tf.random.set_seed(seed)
+from kws_streaming.layers.compat import tf1
+tf1.disable_eager_execution()
 
 
 class SpecAugmentTest(tf.test.TestCase):
@@ -34,7 +31,7 @@ class SpecAugmentTest(tf.test.TestCase):
     self.seed = 6
 
   def test_time_masking(self):
-    set_seed(self.seed)
+    test_utils.set_seed(self.seed)
     spectrogram = np.ones(self.input_shape)
     inputs = tf.keras.layers.Input(
         shape=self.input_shape[1:],
@@ -54,7 +51,7 @@ class SpecAugmentTest(tf.test.TestCase):
     self.assertAllEqual(prediction, target)
 
   def test_frequency_masking(self):
-    set_seed(self.seed)
+    test_utils.set_seed(self.seed)
     spectrogram = np.ones(self.input_shape)
     inputs = tf.keras.layers.Input(
         shape=self.input_shape[1:],

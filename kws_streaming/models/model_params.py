@@ -15,11 +15,14 @@
 
 """Models parameters (with toy values, for testing)."""
 
+from absl import logging
+
 
 class Params(object):
   """Default parameters for data and feature settings.
 
      These parameters are compatible with command line flags
+     and discribed in /train/base_parser.py
   """
 
   def __init__(self):
@@ -37,6 +40,7 @@ class Params(object):
     self.feature_type = 'mfcc_tf'
     self.preemph = 0.0
     self.window_type = 'hann'
+    self.mel_num_bins = 40
     self.mel_lower_edge_hertz = 20.0
     self.mel_upper_edge_hertz = 7000.0
     self.log_epsilon = 1e-12
@@ -44,12 +48,15 @@ class Params(object):
     self.use_tf_fft = 0
     self.mel_non_zero_only = 1
     self.fft_magnitude_squared = False
-    self.mel_num_bins = 40
     self.use_spec_augment = 0
     self.time_masks_number = 2
     self.time_mask_max_size = 10
     self.frequency_masks_number = 2
     self.frequency_mask_max_size = 5
+    self.use_spec_cutout = 0
+    self.spec_cutout_masks_number = 3
+    self.spec_cutout_time_mask_size = 10
+    self.spec_cutout_frequency_mask_size = 5
     self.optimizer = 'adam'
     self.lr_schedule = 'linear'
     self.background_volume = 0.1
@@ -68,6 +75,10 @@ class Params(object):
     self.resample = 0.15
     self.volume_resample = 0.0
     self.return_softmax = 0
+    self.sp_time_shift_ms = 0.0
+    self.sp_resample = 0.0
+    self.pick_deterministically = 0
+    self.verbosity = logging.INFO
 
 
 def att_mh_rnn_params():
@@ -369,7 +380,7 @@ def ds_tc_resnet_params():
   """Parameters for ds_tc_resnet model based on MatchboxNet."""
   params = Params()
   params.model_name = 'ds_tc_resnet'
-  params.padding = 'same'
+  params.ds_padding = "'same','same'"
   params.activation = 'relu'
   params.dropout = 0.0
   params.ds_filters = '4, 4'
@@ -378,7 +389,10 @@ def ds_tc_resnet_params():
   params.ds_kernel_size = '3, 1'
   params.ds_stride = '1, 1'
   params.ds_dilation = '2, 1'
-  params.activation = 'relu'
+  params.ds_pool = '1,1'
+  params.ds_scale = 1
+  params.ds_filter_separable = '1,1'
+  params.ds_max_pool = 0
   return params
 
 

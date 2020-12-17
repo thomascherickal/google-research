@@ -14,9 +14,6 @@
 # limitations under the License.
 
 """Data reader, based on tensorflow/examples/speech_commands."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
 
 import hashlib
 import math
@@ -641,20 +638,29 @@ class AudioProcessor(object):
     if how_many == -1:
       sample_count = len(candidates)
     else:
-      sample_count = max(0, min(how_many, len(candidates) - offset))
+      if flags.pick_deterministically and mode == 'training':
+        # it is a special case:
+        sample_count = how_many
+      else:
+        sample_count = max(0, min(how_many, len(candidates) - offset))
+
     # Data and labels will be populated and returned.
     input_data_shape = modes.get_input_data_shape(flags, modes.Modes.TRAINING)
     data = np.zeros((sample_count,) + input_data_shape)
     labels = np.zeros(sample_count)
     desired_samples = flags.desired_samples
     use_background = self.background_data and (mode == 'training')
-    pick_deterministically = (mode != 'training')
+    pick_deterministically = (mode !=
+                              'training') or flags.pick_deterministically
     # Use the processing graph we created earlier to repeatedly to generate the
     # final output sample data we'll use in training.
     for i in xrange(offset, offset + sample_count):
       # Pick which audio sample to use.
       if how_many == -1 or pick_deterministically:
-        sample_index = i
+        # during inference offset is 0,
+        # but during training offset can be 0 or
+        # training_step * batch_size, so 'i' can go beyond array size
+        sample_index = i % len(candidates)
       else:
         sample_index = np.random.randint(len(candidates))
       sample = candidates[sample_index]

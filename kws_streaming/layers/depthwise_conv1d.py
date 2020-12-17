@@ -14,9 +14,10 @@
 # limitations under the License.
 
 """Depthwise Conv1D layer for streaming and non streaming use case."""
+
+from kws_streaming.layers import modes
 from kws_streaming.layers import temporal_padding
 from kws_streaming.layers.compat import tf
-from kws_streaming.layers.modes import Modes
 
 
 class DepthwiseConv1D(tf.keras.layers.Layer):
@@ -39,7 +40,7 @@ class DepthwiseConv1D(tf.keras.layers.Layer):
                memory_size,
                inference_batch_size=1,
                use_bias=True,
-               mode=Modes.TRAINING,
+               mode=modes.Modes.TRAINING,
                kernel_initializer='glorot_uniform',
                kernel_regularizer=None,
                kernel_constraint=None,
@@ -47,6 +48,7 @@ class DepthwiseConv1D(tf.keras.layers.Layer):
                bias_regularizer=None,
                bias_constraint=None,
                pad='causal',
+               state_name_tag='ExternalState',
                **kwargs):
     super(DepthwiseConv1D, self).__init__(**kwargs)
     self.memory_size = memory_size
@@ -64,6 +66,7 @@ class DepthwiseConv1D(tf.keras.layers.Layer):
     self.bias_regularizer = bias_regularizer
     self.bias_constraint = bias_constraint
     self.pad = pad
+    self.state_name_tag = state_name_tag
 
   def build(self, input_shape):
     super(DepthwiseConv1D, self).build(input_shape)
@@ -82,14 +85,14 @@ class DepthwiseConv1D(tf.keras.layers.Layer):
           regularizer=self.bias_regularizer,
           constraint=self.bias_constraint)
 
-    if self.mode == Modes.STREAM_INTERNAL_STATE_INFERENCE:
+    if self.mode == modes.Modes.STREAM_INTERNAL_STATE_INFERENCE:
       # create state varaible for streamable inference mode only
       self.states = self.add_weight(
-          name='states',
+          name=self.state_name_tag,
           shape=[self.inference_batch_size, self.memory_size, feature_dim],
           trainable=False,
           initializer=tf.zeros_initializer)
-    elif self.mode == Modes.STREAM_EXTERNAL_STATE_INFERENCE:
+    elif self.mode == modes.Modes.STREAM_EXTERNAL_STATE_INFERENCE:
       # in streaming mode with external state,
       # state becomes an input output placeholder
       self.input_state = tf.keras.layers.Input(
@@ -98,7 +101,8 @@ class DepthwiseConv1D(tf.keras.layers.Layer):
               feature_dim,
           ),
           batch_size=self.inference_batch_size,
-          name=self.name + 'input_state')  # adding names to make it unique
+          name=self.name + '/' +
+          self.state_name_tag)  # adding names to make it unique
       self.output_state = None
 
   def call(self, inputs):
@@ -106,23 +110,23 @@ class DepthwiseConv1D(tf.keras.layers.Layer):
     if inputs.shape.rank != 3:  # [batch, time, feature]
       raise ValueError('inputs.shape.rank: %d must be 3 ' % inputs.shape.rank)
 
-    if self.mode == Modes.STREAM_INTERNAL_STATE_INFERENCE:
+    if self.mode == modes.Modes.STREAM_INTERNAL_STATE_INFERENCE:
       # run streamable inference on input [batch, 1, feature]
       # returns output [batch, 1, feature]
       return self._streaming_internal_state(inputs)
-    elif self.mode == Modes.STREAM_EXTERNAL_STATE_INFERENCE:
+    elif self.mode == modes.Modes.STREAM_EXTERNAL_STATE_INFERENCE:
       # in streaming mode with extrnal state in addition to output
       # we return output state
       output, self.output_state = self._streaming_external_state(
           inputs, self.input_state)
       return output
-    elif self.mode in (Modes.TRAINING, Modes.NON_STREAM_INFERENCE):
+    elif self.mode in (modes.Modes.TRAINING, modes.Modes.NON_STREAM_INFERENCE):
       # run non streamable training or non streamable inference
       # on input [batch, time, features],
       # returns output [batch, time, features]
       return self._non_streaming(inputs)
     else:
-      raise ValueError('wrong mode', self.mode)
+      raise ValueError(f'Encountered unexpected mode `{self.mode}`.')
 
   def get_config(self):
     config = {
@@ -137,23 +141,26 @@ class DepthwiseConv1D(tf.keras.layers.Layer):
         'bias_regularizer': self.bias_regularizer,
         'bias_constraint': self.bias_constraint,
         'pad': self.pad,
+        'state_name_tag': self.state_name_tag,
     }
     base_config = super(DepthwiseConv1D, self).get_config()
     return dict(list(base_config.items()) + list(config.items()))
 
   def get_input_state(self):
     # input state will be used only for STREAM_EXTERNAL_STATE_INFERENCE mode
-    if self.mode == Modes.STREAM_EXTERNAL_STATE_INFERENCE:
-      return self.input_state
+    if self.mode == modes.Modes.STREAM_EXTERNAL_STATE_INFERENCE:
+      return [self.input_state]
     else:
-      raise ValueError('wrong mode', self.mode)
+      raise ValueError('Expected the layer to be in external streaming mode, '
+                       f'not `{self.mode}`.')
 
   def get_output_state(self):
     # output state will be used only for STREAM_EXTERNAL_STATE_INFERENCE mode
-    if self.mode == Modes.STREAM_EXTERNAL_STATE_INFERENCE:
-      return self.output_state
+    if self.mode == modes.Modes.STREAM_EXTERNAL_STATE_INFERENCE:
+      return [self.output_state]
     else:
-      raise ValueError('wrong mode', self.mode)
+      raise ValueError('Expected the layer to be in external streaming mode, '
+                       f'not `{self.mode}`.')
 
   def _streaming_internal_state(self, inputs):
     # depthwise 1D convolution in streaming mode with internal state

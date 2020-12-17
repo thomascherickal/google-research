@@ -14,8 +14,9 @@
 # limitations under the License.
 
 """Conv1DTranspose streaming aware layer."""
+
+from kws_streaming.layers import modes
 from kws_streaming.layers.compat import tf
-from kws_streaming.layers.modes import Modes
 
 
 class Conv1DTranspose(tf.keras.layers.Conv1DTranspose):
@@ -30,8 +31,9 @@ class Conv1DTranspose(tf.keras.layers.Conv1DTranspose):
   """
 
   def __init__(self,
-               mode=Modes.TRAINING,
+               mode=modes.Modes.TRAINING,
                inference_batch_size=1,
+               pad_time_dim='causal',
                state_shape=None,
                crop_output=True,
                **kwargs):
@@ -44,11 +46,23 @@ class Conv1DTranspose(tf.keras.layers.Conv1DTranspose):
 
     self.mode = mode
     self.inference_batch_size = inference_batch_size
+    self.pad_time_dim = pad_time_dim
     self.state_shape = state_shape
     self.crop_output = crop_output
 
     self.overlap = self.kernel_size[0] - self.strides[0]
     self.overlap = max(self.overlap, 0)
+
+    if pad_time_dim not in ['same', 'causal']:
+      raise ValueError(
+          'pad_time_dim (\'%s\') must be either \'same\' or \'causal\'' %
+          pad_time_dim)
+
+    if 'padding' in kwargs and kwargs['padding'] != 'valid':
+      raise ValueError(
+          'padding (\'%s\') must be \'valid\'. Use pad_time_dim to make the '
+          'layer causal (\'causal\') or with lookahead (\'same\')' %
+          kwargs['padding'])
 
   def build(self, input_shape):
     super(Conv1DTranspose, self).build(input_shape)
@@ -57,8 +71,8 @@ class Conv1DTranspose(tf.keras.layers.Conv1DTranspose):
       raise ValueError('input_shape.rank:%d must at least 2' % input_shape.rank)
 
     if self.mode in [
-        Modes.STREAM_INTERNAL_STATE_INFERENCE,
-        Modes.STREAM_EXTERNAL_STATE_INFERENCE
+        modes.Modes.STREAM_INTERNAL_STATE_INFERENCE,
+        modes.Modes.STREAM_EXTERNAL_STATE_INFERENCE
     ]:
       if input_shape.as_list()[1] is None:
         raise ValueError('in streaming mode time dimension of input packet '
@@ -66,46 +80,45 @@ class Conv1DTranspose(tf.keras.layers.Conv1DTranspose):
 
       self.output_time_dim = input_shape.as_list()[1] * self.strides[0]
 
-      self.input_state = []
-      self.output_state = []
       if self.overlap > 0:
         self.state_shape = [
             self.inference_batch_size, self.overlap, self.filters
         ]
 
-        if self.mode == Modes.STREAM_INTERNAL_STATE_INFERENCE:
+        if self.mode == modes.Modes.STREAM_INTERNAL_STATE_INFERENCE:
           self.states = self.add_weight(
               name='states',
               shape=self.state_shape,
               trainable=False,
               initializer=tf.zeros_initializer)
 
-        elif self.mode == Modes.STREAM_EXTERNAL_STATE_INFERENCE:
+        elif self.mode == modes.Modes.STREAM_EXTERNAL_STATE_INFERENCE:
           # For streaming inference with extrnal states,
           # the states are passed in as input.
           self.input_state = tf.keras.layers.Input(
               shape=self.state_shape[1:],
               batch_size=self.inference_batch_size,
               name=self.name + '/input_state_remainder')
+          self.output_state = None
 
   def call(self, inputs):
 
-    if self.mode == Modes.STREAM_INTERNAL_STATE_INFERENCE:
+    if self.mode == modes.Modes.STREAM_INTERNAL_STATE_INFERENCE:
       return self._streaming_internal_state(inputs)
 
-    elif self.mode == Modes.STREAM_EXTERNAL_STATE_INFERENCE:
+    elif self.mode == modes.Modes.STREAM_EXTERNAL_STATE_INFERENCE:
       # in streaming inference mode with external state
       # in addition to the output we return the output state.
       output, self.output_state = self._streaming_external_state(
           inputs, self.input_state)
       return output
 
-    elif self.mode in (Modes.TRAINING, Modes.NON_STREAM_INFERENCE):
+    elif self.mode in (modes.Modes.TRAINING, modes.Modes.NON_STREAM_INFERENCE):
       # run non streamable training or non streamable inference
       return self._non_streaming(inputs)
 
     else:
-      raise ValueError('wrong mode', self.mode)
+      raise ValueError(f'Encountered unexpected mode `{self.mode}`.')
 
   def get_config(self):
     config = super(Conv1DTranspose, self).get_config()
@@ -114,6 +127,7 @@ class Conv1DTranspose(tf.keras.layers.Conv1DTranspose):
     config.update({
         'mode': self.mode,
         'inference_batch_size': self.inference_batch_size,
+        'pad_time_dim': self.pad_time_dim,
         'state_shape': self.state_shape,
         'crop_output': self.crop_output,
     })
@@ -184,20 +198,26 @@ class Conv1DTranspose(tf.keras.layers.Conv1DTranspose):
     # during training or non streaming inference, input shape can be dynamic
     output_time_dim = tf.shape(inputs)[1] * self.strides[0]
     if self.crop_output:
-      return outputs[:, 0:output_time_dim, :]
+      if self.pad_time_dim == 'same':
+        crop_left = self.overlap // 2
+        return outputs[:, crop_left:crop_left + output_time_dim, :]
+      else:
+        return outputs[:, 0:output_time_dim, :]
     else:
       return outputs
 
   def get_input_state(self):
     # input state will be used only for STREAM_EXTERNAL_STATE_INFERENCE mode
-    if self.mode == Modes.STREAM_EXTERNAL_STATE_INFERENCE:
-      return self.input_state
+    if self.mode == modes.Modes.STREAM_EXTERNAL_STATE_INFERENCE:
+      return [self.input_state]
     else:
-      raise ValueError('wrong mode', self.mode)
+      raise ValueError('Expected the layer to be in external streaming mode, '
+                       f'not `{self.mode}`.')
 
   def get_output_state(self):
     # output state will be used only for STREAM_EXTERNAL_STATE_INFERENCE mode
-    if self.mode == Modes.STREAM_EXTERNAL_STATE_INFERENCE:
-      return self.output_state
+    if self.mode == modes.Modes.STREAM_EXTERNAL_STATE_INFERENCE:
+      return [self.output_state]
     else:
-      raise ValueError('wrong mode', self.mode)
+      raise ValueError('Expected the layer to be in external streaming mode, '
+                       f'not `{self.mode}`.')

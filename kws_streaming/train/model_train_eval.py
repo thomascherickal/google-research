@@ -101,16 +101,14 @@ bazel run tensorflow/examples/speech_commands:train --
 --data_dir /data --wanted_words up,down --split_data 0
 
 """
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import json
 import os
 import sys
 from absl import logging
 import tensorflow.compat.v1 as tf
-from kws_streaming.layers.modes import Modes
+from kws_streaming.layers import modes
+from kws_streaming.models import model_flags
+from kws_streaming.models import utils
 import kws_streaming.models.att_mh_rnn as att_mh_rnn
 import kws_streaming.models.att_rnn as att_rnn
 import kws_streaming.models.cnn as cnn
@@ -128,10 +126,8 @@ import kws_streaming.models.mobilenet_v2 as mobilenet_v2
 import kws_streaming.models.svdf as svdf
 import kws_streaming.models.svdf_resnet as svdf_resnet
 import kws_streaming.models.tc_resnet as tc_resnet
-from kws_streaming.models.utils import parse
 import kws_streaming.models.xception as xception
 from kws_streaming.train import base_parser
-from kws_streaming.train import model_flags
 from kws_streaming.train import train
 import kws_streaming.train.test as test
 
@@ -158,10 +154,11 @@ def main(_):
     json.dump(flags.__dict__, f)
 
   # convert to SavedModel
-  test.convert_model_saved(flags, 'non_stream', Modes.NON_STREAM_INFERENCE)
+  test.convert_model_saved(flags, 'non_stream',
+                           modes.Modes.NON_STREAM_INFERENCE)
   try:
     test.convert_model_saved(flags, 'stream_state_internal',
-                             Modes.STREAM_INTERNAL_STATE_INFERENCE)
+                             modes.Modes.STREAM_INTERNAL_STATE_INFERENCE)
   except (ValueError, IndexError) as e:
     logging.info('FAILED to run TF streaming: %s', e)
 
@@ -200,7 +197,7 @@ def main(_):
 
     folder_name = opt_name + 'tflite_non_stream'
     file_name = 'non_stream.tflite'
-    mode = Modes.NON_STREAM_INFERENCE
+    mode = modes.Modes.NON_STREAM_INFERENCE
     test.convert_model_tflite(flags, folder_name, mode, file_name,
                               optimizations=optimizations)
     test.tflite_non_stream_model_accuracy(flags, folder_name, file_name)
@@ -215,14 +212,14 @@ def main(_):
     # below models can use striding in time dimension,
     # but this is currently unsupported
     elif flags.model_name == 'cnn':
-      for strides in parse(flags.cnn_strides):
+      for strides in utils.parse(flags.cnn_strides):
         if strides[0] > 1:
           model_is_streamable = False
           break
     elif flags.model_name == 'ds_cnn':
-      if parse(flags.cnn1_strides)[0] > 1:
+      if utils.parse(flags.cnn1_strides)[0] > 1:
         model_is_streamable = False
-      for strides in parse(flags.dw2_strides):
+      for strides in utils.parse(flags.dw2_strides):
         if strides[0] > 1:
           model_is_streamable = False
           break
@@ -258,7 +255,7 @@ def main(_):
         # convert model to TFlite
         folder_name = opt_name + 'tflite_stream_state_external'
         file_name = 'stream_state_external.tflite'
-        mode = Modes.STREAM_EXTERNAL_STATE_INFERENCE
+        mode = modes.Modes.STREAM_EXTERNAL_STATE_INFERENCE
         test.convert_model_tflite(flags, folder_name, mode, file_name,
                                   optimizations=optimizations)
 

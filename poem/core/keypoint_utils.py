@@ -239,7 +239,7 @@ def standardize_points(points):
 def compute_procrustes_alignment_params(target_points,
                                         source_points,
                                         point_masks=None):
-  """Computes procrustes alignment parameters.
+  """Computes Procrustes alignment parameters.
 
   Args:
     target_points: A tensor for target points. Shape = [..., num_points,
@@ -368,6 +368,8 @@ def compute_procrustes_aligned_mpjpes(target_points,
       aligned_source_points, target_points, point_masks=point_masks)
 
 
+
+
 def normalize_points_by_image_size(points, image_sizes):
   """Normalizes point coordinates by image sizes.
 
@@ -459,6 +461,45 @@ def rotate_points(rotation_matrices, points):
   return rotated_points
 
 
+def create_smooth_rotation_matrices(start_euler_angles, end_euler_angles,
+                                    num_views):
+  """Creates parameters to generate smooth rotation trajectories.
+
+  Args:
+    start_euler_angles: A tuple of start euler angles including
+      (azimuths, elevations, rolls). Each euler angle tensor in the tuple is in
+      shape [...].
+    end_euler_angles: A tuple of end euler angles including
+      (azimuths, elevations, rolls). Each euler angle tensor in the tuple is in
+      shape [...].
+    num_views: An integer of number of views to be rotated.
+
+  Returns:
+    rotations: A rotation metrics of shape [..., num_views, 3, 3].
+
+  Raises:
+    ValueError: Minimal number of views needs to be larger than 2.
+  """
+  if num_views < 2:
+    raise ValueError('Minimal number of views needs to be larger than 2.')
+
+  division = num_views - 1
+  start_azimuths, start_elevations, start_rolls = start_euler_angles
+  end_azimuths, end_elevations, end_rolls = end_euler_angles
+  delta_azimuths = (end_azimuths - start_azimuths) / division
+  delta_elevations = (end_elevations - start_elevations) / division
+  delta_rolls = (end_rolls - start_rolls) / division
+
+  rotations = []
+  for i in range(num_views):
+    azimuths = start_azimuths + delta_azimuths * i
+    elevations = start_elevations + delta_elevations * i
+    rolls = start_rolls + delta_rolls * i
+    rotations.append(create_rotation_matrices_3d(azimuths, elevations, rolls))
+  rotations = tf.stack(rotations, axis=-3)
+  return rotations
+
+
 def random_rotate_and_project_3d_to_2d(keypoints_3d,
                                        azimuth_range=(-math.pi, math.pi),
                                        elevation_range=(-math.pi / 6.0,
@@ -466,11 +507,12 @@ def random_rotate_and_project_3d_to_2d(keypoints_3d,
                                        roll_range=(0.0, 0.0),
                                        default_camera=True,
                                        default_camera_z=2.0,
+                                       sequential_inputs=False,
                                        seed=None):
   """Randomly rotates and projects 3D keypoints to 2D.
 
   Args:
-    keypoints_3d: A tensor for 3D keypoints. Shape = [..., 3].
+    keypoints_3d: A tensor for 3D keypoints. Shape = [..., num_keypoints, 3].
     azimuth_range: A tuple for minimum and maximum azimuth angles to randomly
       rotate 3D keypoints with.
     elevation_range: A tuple for minimum and maximum elevation angles to
@@ -479,28 +521,57 @@ def random_rotate_and_project_3d_to_2d(keypoints_3d,
       3D keypoints with.
     default_camera: Whether we want to transform to default camera view.
     default_camera_z: A float for depth of default camera position.
+    sequential_inputs: A boolean flag indicating whether the inputs are
+      sequential. If True, the input keypoints are supposed to be in shape
+      [..., sequence_length, num_keypoints, 3].
     seed: An integer for random seed.
 
   Returns:
     keypoints_2d: A tensor for projected 2D keypoints from randomly rotated 3D
       keypoints.
   """
-  azimuths = tf.random.uniform(
-      tf.shape(keypoints_3d)[:-2],
-      minval=azimuth_range[0],
-      maxval=azimuth_range[1],
-      seed=seed)
-  elevations = tf.random.uniform(
-      tf.shape(keypoints_3d)[:-2],
-      minval=elevation_range[0],
-      maxval=elevation_range[1],
-      seed=seed)
-  rolls = tf.random.uniform(
-      tf.shape(keypoints_3d)[:-2],
-      minval=roll_range[0],
-      maxval=roll_range[1],
-      seed=seed)
-  rotation_matrices = create_rotation_matrices_3d(azimuths, elevations, rolls)
+  if not sequential_inputs:
+    azimuths = tf.random.uniform(
+        tf.shape(keypoints_3d)[:-2],
+        minval=azimuth_range[0],
+        maxval=azimuth_range[1],
+        seed=seed)
+    elevations = tf.random.uniform(
+        tf.shape(keypoints_3d)[:-2],
+        minval=elevation_range[0],
+        maxval=elevation_range[1],
+        seed=seed)
+    rolls = tf.random.uniform(
+        tf.shape(keypoints_3d)[:-2],
+        minval=roll_range[0],
+        maxval=roll_range[1],
+        seed=seed)
+    rotation_matrices = create_rotation_matrices_3d(azimuths, elevations, rolls)
+  else:
+    def create_random_euler_angles():
+      azimuths = tf.random.uniform(
+          tf.shape(keypoints_3d)[:-3],
+          minval=azimuth_range[0],
+          maxval=azimuth_range[1],
+          seed=seed)
+      elevations = tf.random.uniform(
+          tf.shape(keypoints_3d)[:-3],
+          minval=elevation_range[0],
+          maxval=elevation_range[1],
+          seed=seed)
+      rolls = tf.random.uniform(
+          tf.shape(keypoints_3d)[:-3],
+          minval=roll_range[0],
+          maxval=roll_range[1],
+          seed=seed)
+      return (azimuths, elevations, rolls)
+
+    num_views = keypoints_3d.shape.as_list()[-3]
+    start_euler_angles = create_random_euler_angles()
+    end_euler_angles = create_random_euler_angles()
+    rotation_matrices = create_smooth_rotation_matrices(
+        start_euler_angles, end_euler_angles, num_views=num_views)
+
   # TODO(liuti): Reconcile this with `rotate_points`.
   keypoints_3d = tf.linalg.matrix_transpose(
       tf.matmul(rotation_matrices, keypoints_3d, transpose_b=True))
@@ -568,6 +639,7 @@ def random_project_and_select_keypoints(keypoints_3d,
                                         roll_range,
                                         keypoint_masks_3d=None,
                                         default_camera_z=2.0,
+                                        sequential_inputs=False,
                                         seed=None):
   """Generates 2D keypoints from random 3D keypoint projection.
 
@@ -589,6 +661,9 @@ def random_project_and_select_keypoints(keypoints_3d,
     keypoint_masks_3d: A tensor for input 3D keypoint masks. Shape = [...,
       num_keypoints_3d]. Ignored if None.
     default_camera_z: A float for depth of default camera position.
+    sequential_inputs: A boolean flag indicating whether the inputs are
+      sequential, if true, the input keypoints are supposed to be in shape
+      [..., num_views, num_keypoints, 3].
     seed: An integer for random seed.
 
   Returns:
@@ -615,6 +690,7 @@ def random_project_and_select_keypoints(keypoints_3d,
       roll_range=roll_range,
       default_camera=True,
       default_camera_z=default_camera_z,
+      sequential_inputs=sequential_inputs,
       seed=seed)
   keypoints_2d, keypoint_masks_2d = select_keypoints_by_name(
       keypoints_2d,
@@ -701,9 +777,28 @@ def insert_at_indices(keypoints, indices, insert_keypoints=None):
   return tf.gather(keypoints, indices=perm_indices, axis=-2)
 
 
-def transfer_keypoint_masks(input_keypoint_masks, input_keypoint_profile,
-                            output_keypoint_profile):
-  """Transfers keypoint masks according to a different profile."""
+def transfer_keypoint_masks(input_keypoint_masks,
+                            input_keypoint_profile,
+                            output_keypoint_profile,
+                            enforce_surjectivity=True):
+  """Transfers keypoint masks according to a different profile.
+
+  Args:
+    input_keypoint_masks: A list of tensors for input keypoint masks.
+    input_keypoint_profile: A KeypointProfile object for input keypoints.
+    output_keypoint_profile: A KeypointProfile object for output keypoints.
+    enforce_surjectivity: A boolean for whether to enforce all output keypoint
+      masks are transferred from input keypoint masks. If True and any output
+      keypoint mask does not come from some input keypoint mask, error will be
+      raised. If False, uncorresponded output keypoints will have all-one masks.
+
+  Returns:
+    A tensor for output keypoint masks.
+
+  Raises:
+    ValueError: `Enforce_surjective` is True, but mapping from input keypoint to
+      output keypoint is not surjective.
+  """
   input_keypoint_masks = tf.split(
       input_keypoint_masks,
       num_or_size_splits=input_keypoint_profile.keypoint_num,
@@ -727,4 +822,12 @@ def transfer_keypoint_masks(input_keypoint_masks, input_keypoint_profile,
           tf.stack(input_keypoint_mask_subset, axis=-1),
           axis=-1,
           keepdims=False)
+
+  for i, output_keypoint_mask in enumerate(output_keypoint_masks):
+    if output_keypoint_mask is None:
+      if enforce_surjectivity:
+        raise ValueError('Uncorresponded output keypoints: index = %d.' % i)
+      else:
+        output_keypoint_masks[i] = tf.ones_like(input_keypoint_masks[0])
+
   return tf.concat(output_keypoint_masks, axis=-1)

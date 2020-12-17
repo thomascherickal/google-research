@@ -1,4 +1,4 @@
-// Copyright 2020 The Google Research Authors.
+// Copyright 2020 The Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,8 +25,8 @@
 
 #include "graph.h"
 
+#include "absl/container/node_hash_map.h"
 
-using std::unordered_map;
 using std::unordered_set;
 using std::vector;
 

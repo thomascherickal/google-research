@@ -1,7 +1,8 @@
 # Streaming Aware neural network models
 ======================================================================================
 
-Summary about this work is presented at paper [Streaming keyword spotting on mobile devices](https://arxiv.org/abs/2005.06720)
+Summary about this work is presented at paper [Streaming keyword spotting on mobile devices](https://arxiv.org/abs/2005.06720).
+Please cite the paper in your publications if you find the source code useful for your research.
 
 Streaming aware neural network models are important for real time response,
 high accuracy and good user experience. In this work we designed keras streaming
@@ -9,26 +10,31 @@ wrappers and streaming aware layers. By streaming we mean streaming inference,
 where model receives portion of the input sequence (for example 20ms of audio),
 process it incrementally and return an output(for example classification result).
 Non streaming means that model has to receive the whole sequence
-(for example 1 sec) and then return an output.
+(for example 1 sec of audio) and then return an output.
 We applied this lib for keyword spotting (KWS) problem
 and implemented most popular KWS models:
-* [dnn](https://arxiv.org/pdf/1711.07128.pdf) - deep neural network based on combination of fully connected layers;
-* dnn_raw - an example of [dnn](https://arxiv.org/pdf/1711.07128.pdf) model on raw audio features;
-* [gru](https://arxiv.org/pdf/1711.07128.pdf) - gated recurrent unit model;
-* [lstm](https://arxiv.org/pdf/1711.07128.pdf) - long short term memory model;
-* [cnn](https://arxiv.org/pdf/1711.07128.pdf) - convolutional neural network;
-* [tc_resnet](https://arxiv.org/pdf/1904.03814.pdf) - temporal convolution with sequence of residual blocks;
-* [crnn](https://arxiv.org/pdf/1711.07128.pdf) - combination of convolutional layers with RNNs(GRU or LSTM);
-* [ds_cnn](https://arxiv.org/pdf/1711.07128.pdf) - depth wise convolutional neural network;
-* [svdf](https://arxiv.org/pdf/1812.02802.pdf) - singular value decomposition filter neural network (sequence of 1d depthwise conv and 1x1 conv);
-* svdf_resnet - [svdf](https://arxiv.org/pdf/1812.02802.pdf) neural network with residual connections;
-* [att_rnn](https://arxiv.org/pdf/1808.08929.pdf) - combination of attention with RNN(bi directional LSTM);
-* att_mh_rnn - extended version of [att_rnn](https://arxiv.org/pdf/1808.08929.pdf) with multihead attention;
-* [mobilenet](https://arxiv.org/abs/1704.04861) - reduced version of mobilenet vision/imagenet model, but with 1d temporal conv;
-* [mobilenet_v2](https://arxiv.org/abs/1801.04381) - reduced version of mobilenet_v2 vision/imagenet model, but with 1d temporal conv;
-* [xception](https://arxiv.org/abs/1610.02357) - reduced version of xception vision/imagenet model;
-* [inception](http://arxiv.org/abs/1512.00567) - reduced version of inception vision/imagenet model;
-* [inception_resnet](https://arxiv.org/abs/1602.07261) - reduced version of inception_resnet vision/imagenet model;
+
+|  Model name      | Description  | Streamable |
+| ---------------- | --------------------- | --------------------- |
+|[dnn](https://arxiv.org/pdf/1711.07128.pdf) | deep neural network based on combination of fully connected layers      | yes      |
+| dnn_raw | an example of [dnn](https://arxiv.org/pdf/1711.07128.pdf) model on raw audio features  |   yes     |
+| [gru](https://arxiv.org/pdf/1711.07128.pdf) | gated recurrent unit model  |   yes     |
+| [lstm](https://arxiv.org/pdf/1711.07128.pdf) | long short term memory model  |   yes     |
+| [cnn](https://arxiv.org/pdf/1711.07128.pdf) | basic convolutional neural network  |   yes     |
+| [crnn](https://arxiv.org/pdf/1711.07128.pdf) | combination of convolutional layers with RNNs(GRU or LSTM)  |   yes     |
+| [ds_cnn](https://arxiv.org/pdf/1711.07128.pdf) | depth wise convolutional neural network  |   yes     |
+| [svdf](https://arxiv.org/pdf/1812.02802.pdf) | singular value decomposition filter neural network (sequence of 1d depthwise conv and 1x1 conv)  |   yes     |
+| svdf_resnet | [svdf](https://arxiv.org/pdf/1812.02802.pdf) neural network with residual connections  |   yes     |
+| ds_tc_resnet | combination of 1d depthwise convolution in time with residual blocks, based on [MatchboxNet](https://arxiv.org/abs/2004.08531)  |   yes     |
+| [att_rnn](https://arxiv.org/pdf/1808.08929.pdf) | combination of cnn, RNN(bi directional LSTM) and attention  |   no     |
+| att_mh_rnn | extended version of [att_rnn](https://arxiv.org/pdf/1808.08929.pdf) with multihead attention |   no     |
+| [tc_resnet](https://arxiv.org/pdf/1904.03814.pdf) | temporal convolution with sequence of residual blocks  |   not converted     |
+| [mobilenet](https://arxiv.org/abs/1704.04861) | reduced version of mobilenet vision/imagenet model, but with 1d temporal conv |   not converted     |
+| [mobilenet_v2](https://arxiv.org/abs/1801.04381) | reduced version of mobilenet_v2 vision/imagenet model, but with 1d temporal conv |   not converted     |
+| [xception](https://arxiv.org/abs/1610.02357) | reduced version of xception vision/imagenet model |   not converted     |
+| [inception](http://arxiv.org/abs/1512.00567) | reduced version of inception vision/imagenet model |   not converted     |
+| [inception_resnet](https://arxiv.org/abs/1602.07261) | reduced version of inception_resnet vision/imagenet model |   not converted     |
+
 
 They all use speech feature extractor, which is easy to configure as MFCC, LFBE
 or raw features (so user can train own speech feature extractor).
@@ -64,9 +70,24 @@ to streaming mode.
 ## Experimental results
 
 All experiments are listed in folder "experiments". It contains:
-* kws_experiments_paper - experiments presented in [paper](https://arxiv.org/abs/2005.06720)
-* kws_experiments_q - quantized model presented in [paper](https://arxiv.org/abs/2005.06720)
-* kws_experiments_30k - models with 30k parameters.
+* [kws_experiments_paper_12_labels](https://github.com/google-research/google-research/blob/master/kws_streaming/experiments/kws_experiments_paper_12_labels.md) - experiments presented in [paper](https://arxiv.org/abs/2005.06720): models trained on [data set](https://arxiv.org/pdf/1804.03209.pdf) with 12 labels.
+* [kws_experiments_quantized_12_labels](https://github.com/google-research/google-research/blob/master/kws_streaming/experiments/kws_experiments_quantized_12_labels.md) - quantized model presented in [paper](https://arxiv.org/abs/2005.06720): models trained on [data set](https://arxiv.org/pdf/1804.03209.pdf) with 12 labels.
+* [kws_experiments_30k_12_labels](https://github.com/google-research/google-research/blob/master/kws_streaming/experiments/kws_experiments_30k_12_labels.md) - models with 30k parameters, trained on [data set](https://arxiv.org/pdf/1804.03209.pdf) with 12 labels.
+* [kws_experiments_35_labels](https://github.com/google-research/google-research/blob/master/kws_streaming/experiments/kws_experiments_35_labels.md) - models trained on [data set v2](https://arxiv.org/pdf/1804.03209.pdf) with 35 labels. It is a good example of training models on custom data.
+* [kws_experiments_12_labels](https://github.com/google-research/google-research/blob/master/kws_streaming/experiments/kws_experiments_12_labels.md) - models trained on [data set v2](https://arxiv.org/pdf/1804.03209.pdf) with 12 labels (latest experiments with different hyperparameters).
+
+The latest experiments on speech commands V2 with 12 labels are show in below table:
+|  Model name      | accuracy [%]  | # parameters |
+| ---------------- | --------------------- | --------------------- |
+|[ds_tc_resnet](https://github.com/google-research/google-research/blob/master/kws_streaming/experiments/kws_experiments_12_labels.md) with <br> [MatchboxNet](https://arxiv.org/abs/2004.08531) topology | 98.0      | 75K      |
+|[att_mh_rnn ](https://github.com/google-research/google-research/blob/master/kws_streaming/experiments/kws_experiments_12_labels.md)| 98.3  |   750K     |
+
+The latest experiments on speech commands V2 with 35 labels are show in below table:
+|  Model name      | accuracy [%]  | # parameters |
+| ---------------- | --------------------- | --------------------- |
+|[ds_tc_resnet](https://github.com/google-research/google-research/blob/master/kws_streaming/experiments/kws_experiments_35_labels.md) with <br> [MatchboxNet](https://arxiv.org/abs/2004.08531) topology | 96.9      | 75K      |
+
+
 
 ### Streamable and non streamable models
 
@@ -122,19 +143,27 @@ output = tf.keras.layers.Dense(...)(output)
 * Models which require access to the whole input sequence are not streamable, such as bidirectional RNN or attention computed over the whole sequence.
 * Any causal models including models with pooling and striding in time dimension can be supported in streaming mode: for example [test_stream_strided_convolution](https://github.com/google-research/google-research/blob/master/kws_streaming/layers/stream_test.py). For causal models we set padding='causal'. If the model is not causal, then the delay layer has to be inserted manually, as it is shown in [residual_model](https://github.com/google-research/google-research/blob/master/kws_streaming/layers/delay_test.py).
 
+### Edge cases:
+* Input data length has to be aligned with striding/pooling, for example if total striding=4, input data length has to be 4. It allows us to run convs efficiently.
+* pool_size and strides in time dim has to be the same. If they are different it is still streamable but needs to be implemented.
+* Conv() in streaming mode can return a sequence, so it can be applied on any aligned sequence, for example if total striding=4, input data length can be 4, 8, etc
+* Flatten(), GlobalMaxPooling2D(), GlobalAveragePooling2D() can return only one output, so they can not be applied on any aligned sequence, for example if total striding=4, input data length has to be 4.
+* We can run biLSTM after the Flatten() layer. Flatten() can be considered as “unstreaming”.
+
+
 ## Inference
 KWS model in streaming mode is executed by steps:
 
 1. Receive sample(packet), for example audio data from microphone.
 2. Feed these data into KWS model
 3. Process these data and return detection output
-4. Go to next inference iteration to step 1 above.
+4. Go to the next inference iteration to step 1 above.
 Most of the layers are streamable by default for example activation layers:
-relu, sigmoid; or dense layer. These layers does not have any state.
-So we can call them stateless layers.
+relu, sigmoid; or dense layer. These layers do not have any state.
+So we can call them stateless layers. But some layers can have state, we call them stateful layers.
 
 ### State management
-Where state is some buffer with data which is going to be reused in the
+State is a buffer with data which is going to be reused in the
 next iteration of the inference.
 Examples of layers with states are LSTM, GRU.
 
@@ -180,7 +209,7 @@ We change neural net topology by introducing additional buffers/states
 into layers such as conv, lstm, etc.
 We receive audio data in streaming mode: packet by packet.
 (so we do not have access to the whole sequence).
-Inference graph is stateful, so that graph has internal states which are kept
+Inference graph is stateful, so that graph has internal states which are kept updated 
 between inference invocations.
 
 4. Streaming inference with external state
@@ -189,14 +218,13 @@ We change neural net topology by introducing additional
 input/output buffers/states into layers such as conv, lstm, etc.
 We receive audio data in streaming mode: packet by packet.
 (so we do not have access to the whole sequence).
-Inference graph is stateless, so that graph has not internal state.
+Inference graph is stateless, so that graph has no internal state.
 All states are received as inputs and after update are returned as output state
 
 ### Further information
 Summary about this work is presented at paper [Streaming keyword spotting on mobile devices](https://arxiv.org/abs/2005.06720)
 All experiments on KWS models presented in this paper can be reproduced by
-following the steps described in
-`kws_streaming/experiments/kws_experiments_paper.txt`.
+following the steps described in [kws_experiments_paper](https://github.com/google-research/google-research/blob/master/kws_streaming/experiments/kws_experiments_paper.md).
 Models were trained on a desktop (Ubuntu) and tested on a Pixel4 phone.
 
 
@@ -204,10 +232,10 @@ Code directory structure:
 
 * `colab` - examples of running KWS models
 * `data` - data reading utilities
-* `experiments` - command lines for model training and evaluation
+* `experiments` - examples with description of how to do model training and evaluation
 * `layers` - streaming aware layers with speech feature extractor and layer tests
 * `models` - KWS model definitions
-* `train` - model training and evaluation
+* `train` - model training and evaluation utilities
 
 Below is an example of evaluation and training DNN model:
 
@@ -484,7 +512,7 @@ Description of the content of the model folder models1/dnn_1:
 ├── last_weights.index - weights of the model at last training iteration (used for debugging)
 ├── logs
 │   ├── train
-│   │   └── events.out.tfevents... - tranining loss/accuracy on every minibatch
+│   │   └── events.out.tfevents... - training loss/accuracy on every minibatch
 │   └── validation
 │       └── events.out.tfevents... - validation loss/accuracy on every eval step
 ├── model_summary.txt - model topology in non streaming mode
@@ -503,11 +531,11 @@ Description of the content of the model folder models1/dnn_1:
 │   ├── model_summary.txt
 │   ├── non_stream.tflite - quantized non streaming TFlite model
 │   └── tflite_non_stream_model_accuracy.txt  - accuracy of quantized TFlite model
-├── quantize_opt_for_size_tflite_stream_state_external - quantized streamimg TFlite model, works with options:
+├── quantize_opt_for_size_tflite_stream_state_external - quantized streaming TFlite model, works with options:
 |   |        (preprocess 'raw'; feature_type 'mfcc_op')
 |   |        (preprocess 'mfcc')
 |   |        (preprocess 'micro')
-|   |        Not all models can be streamed (check models desription above)
+|   |        Not all models can be streamed (check models description above)
 │   ├── model_summary.txt - model topology in streaming mode with external state
 │   ├── stream_state_external.tflite - quantized streaming TFlite model
 │   ├── tflite_stream_state_external_model_accuracy_reset0.txt - accuracy of TFLite streaming model

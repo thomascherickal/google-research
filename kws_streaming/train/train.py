@@ -21,15 +21,13 @@
   3. Trains model
   4. Select the best model and evaluates it
 """
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
 
 import os.path
 import pprint
 from absl import logging
 import numpy as np
 import tensorflow.compat.v1 as tf
+import tensorflow_addons as tfa
 import kws_streaming.data.input_data as input_data
 from kws_streaming.models import models
 from kws_streaming.models import utils
@@ -86,6 +84,13 @@ def train(flags):
     optimizer = tf.keras.optimizers.Adam(epsilon=flags.optimizer_epsilon)
   elif flags.optimizer == 'momentum':
     optimizer = tf.keras.optimizers.SGD(momentum=0.9)
+  elif flags.optimizer == 'novograd':
+    optimizer = tfa.optimizers.NovoGrad(
+        lr=0.05,
+        beta_1=flags.novograd_beta_1,
+        beta_2=flags.novograd_beta_2,
+        weight_decay=flags.novograd_weight_decay,
+        grad_averaging=bool(flags.novograd_grad_averaging))
   else:
     raise ValueError('Unsupported optimizer:%s' % flags.optimizer)
 
@@ -117,11 +122,13 @@ def train(flags):
 
   # Training loop.
   for training_step in range(start_step, training_steps_max + 1):
+    offset = (training_step -
+              1) * flags.batch_size if flags.pick_deterministically else 0
     # Pull the audio samples we'll use for training.
     train_fingerprints, train_ground_truth = audio_processor.get_data(
-        flags.batch_size, 0, flags, flags.background_frequency,
-        flags.background_volume, time_shift_samples, 'training', flags.resample,
-        flags.volume_resample, sess)
+        flags.batch_size, offset, flags, flags.background_frequency,
+        flags.background_volume, time_shift_samples, 'training',
+        flags.resample, flags.volume_resample, sess)
 
     if flags.lr_schedule == 'exp':
       learning_rate_value = lr_init * np.exp(-exp_rate * training_step)

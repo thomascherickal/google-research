@@ -14,15 +14,15 @@
 # limitations under the License.
 
 """Tests for kws_streaming.layers.stream."""
-import random as rn
+
 from absl.testing import parameterized
 import numpy as np
+from kws_streaming.layers import modes
 from kws_streaming.layers import stream
 from kws_streaming.layers import temporal_padding
 from kws_streaming.layers import test_utils
 from kws_streaming.layers.compat import tf
 from kws_streaming.layers.compat import tf1
-from kws_streaming.layers.modes import Modes
 from kws_streaming.models import utils
 from kws_streaming.train import test
 tf1.disable_eager_execution()
@@ -45,19 +45,21 @@ class Sum(tf.keras.layers.Layer):
     return dict(list(base_config.items()) + list(config.items()))
 
 
-def conv_model(flags, cnn_filters, cnn_kernel_size, cnn_act, cnn_dilation_rate,
-               cnn_strides, cnn_use_bias):
+def conv_model(flags, conv_cell, cnn_filters, cnn_kernel_size, cnn_act,
+               cnn_dilation_rate, cnn_strides, cnn_use_bias, **kwargs):
   """Toy example of convolutional model with Stream wrapper.
 
   It can be used for speech enhancement.
   Args:
       flags: model and data settings
+      conv_cell: cell for streaming, for example: tf.keras.layers.Conv1D
       cnn_filters: list of filters in conv layer
       cnn_kernel_size: list of kernel_size in conv layer
       cnn_act: list of activation functions in conv layer
       cnn_dilation_rate: list of dilation_rate in conv layer
       cnn_strides: list of strides in conv layer
       cnn_use_bias: list of use_bias in conv layer
+      **kwargs: Additional kwargs passed on to conv_cell.
   Returns:
     Keras model
 
@@ -83,34 +85,38 @@ def conv_model(flags, cnn_filters, cnn_kernel_size, cnn_act, cnn_dilation_rate,
                         cnn_dilation_rate, cnn_strides, cnn_use_bias):
 
     net = stream.Stream(
-        cell=tf.keras.layers.Conv1D(
+        cell=conv_cell(
             filters=filters,
             kernel_size=kernel_size,
             activation=activation,
             dilation_rate=dilation_rate,
             strides=strides,
             use_bias=use_bias,
-            padding='valid'),
+            padding='valid',
+            **kwargs),
         use_one_step=False,
         pad_time_dim='causal')(net)
 
   return tf.keras.Model(input_audio, net)
 
 
-def conv_model_no_stream_wrapper(flags, cnn_filters, cnn_kernel_size, cnn_act,
-                                 cnn_dilation_rate, cnn_strides, cnn_use_bias):
+def conv_model_no_stream_wrapper(flags, conv_cell, cnn_filters, cnn_kernel_size,
+                                 cnn_act, cnn_dilation_rate, cnn_strides,
+                                 cnn_use_bias, **kwargs):
   """Toy example of convolutional model.
 
   It has the same model topology as in conv_model() above, but without
   wrapping conv cell by Stream layer, so that all parameters set manually.
   Args:
       flags: model and data settings
+      conv_cell: cell for streaming, for example: tf.keras.layers.Conv1D
       cnn_filters: list of filters in conv layer
       cnn_kernel_size: list of kernel_size in conv layer
       cnn_act: list of activation functions in conv layer
       cnn_dilation_rate: list of dilation_rate in conv layer
       cnn_strides: list of strides in conv layer
       cnn_use_bias: list of use_bias in conv layer
+      **kwargs: Additional kwargs passed on to conv_cell.
   Returns:
     Keras model
   """
@@ -133,7 +139,8 @@ def conv_model_no_stream_wrapper(flags, cnn_filters, cnn_kernel_size, cnn_act,
       cnn_act, cnn_dilation_rate,
       cnn_strides, cnn_use_bias):
 
-    ring_buffer_size_in_time_dim = dilation_rate * (kernel_size - 1)
+    ring_buffer_size_in_time_dim = max(
+        dilation_rate * (kernel_size - 1) - (strides - 1), 0)
     net = stream.Stream(
         cell=tf.identity,
         ring_buffer_size_in_time_dim=ring_buffer_size_in_time_dim,
@@ -145,14 +152,75 @@ def conv_model_no_stream_wrapper(flags, cnn_filters, cnn_kernel_size, cnn_act,
         padding='causal', padding_size=padding_size)(
             net)
 
-    net = tf.keras.layers.Conv1D(
+    net = conv_cell(
         filters=filters,
         kernel_size=kernel_size,
         activation=activation,
         dilation_rate=dilation_rate,
         strides=strides,
         use_bias=use_bias,
-        padding='valid')(net)  # padding has to be valid!
+        padding='valid',  # padding has to be valid!
+        **kwargs)(net)
+
+  return tf.keras.Model(input_audio, net)
+
+
+def conv_model_keras_native(flags, conv_cell, cnn_filters, cnn_kernel_size,
+                            cnn_act, cnn_dilation_rate, cnn_strides,
+                            cnn_use_bias, **kwargs):
+  """Toy example of convolutional model without any streaming components.
+
+  It has the same model topology as in conv_model() above, but using only native
+  Keras layers and no streaming components.
+  Args:
+      flags: model and data settings
+      conv_cell: cell for streaming, for example: tf.keras.layers.Conv1D
+      cnn_filters: list of filters in conv layer
+      cnn_kernel_size: list of kernel_size in conv layer
+      cnn_act: list of activation functions in conv layer
+      cnn_dilation_rate: list of dilation_rate in conv layer
+      cnn_strides: list of strides in conv layer
+      cnn_use_bias: list of use_bias in conv layer
+      **kwargs: Additional kwargs passed on to conv_cell.
+  Returns:
+    Keras model
+  """
+
+  if not all(
+      len(cnn_filters) == len(l) for l in [
+          cnn_filters, cnn_kernel_size, cnn_act, cnn_dilation_rate, cnn_strides,
+          cnn_use_bias
+      ]):
+    raise ValueError('all input lists have to be the same length')
+
+  input_audio = tf.keras.layers.Input(
+      shape=(flags.desired_samples,), batch_size=flags.batch_size)
+  net = input_audio
+
+  net = tf.keras.backend.expand_dims(net)
+
+  for filters, kernel_size, activation, dilation_rate, strides, use_bias in zip(
+      cnn_filters, cnn_kernel_size,
+      cnn_act, cnn_dilation_rate,
+      cnn_strides, cnn_use_bias):
+
+    # Note: This explicit padding is different from calling
+    # conv_cell(..., padding='causal) directly when strides > 1. The latter
+    # is suboptimal because it pads `strides - 1` extra zeros and hence ignores
+    # the rightmost `strides - 1` valid samples. See the comments in
+    # test_strided_conv_alignment() for a more concrete example.
+    net = tf.keras.layers.ZeroPadding1D(
+        [max(dilation_rate * (kernel_size - 1) - (strides - 1), 0), 0])(
+            net)
+    net = conv_cell(
+        filters=filters,
+        kernel_size=kernel_size,
+        activation=activation,
+        dilation_rate=dilation_rate,
+        strides=strides,
+        use_bias=use_bias,
+        padding='valid',
+        **kwargs)(net)
 
   return tf.keras.Model(input_audio, net)
 
@@ -161,10 +229,7 @@ class StreamTest(tf.test.TestCase, parameterized.TestCase):
 
   def setUp(self):
     super(StreamTest, self).setUp()
-    seed = 123
-    np.random.seed(seed)
-    rn.seed(seed)
-    tf.random.set_seed(seed)
+    test_utils.set_seed(123)
 
   def test_streaming_with_effective_tdim(self):
     time_size = 10
@@ -179,7 +244,7 @@ class StreamTest(tf.test.TestCase, parameterized.TestCase):
         batch_size=batch_size,
         name='inp_sequence')
 
-    mode = Modes.TRAINING
+    mode = modes.Modes.TRAINING
 
     # in streaming mode it will create a
     # ring buffer with time dim size ring_buffer_size_in_time_dim
@@ -190,7 +255,7 @@ class StreamTest(tf.test.TestCase, parameterized.TestCase):
     model_train = tf.keras.Model(inputs, outputs)
     model_train.summary()
 
-    mode = Modes.STREAM_EXTERNAL_STATE_INFERENCE
+    mode = modes.Modes.STREAM_EXTERNAL_STATE_INFERENCE
     input_tensors = [
         tf.keras.layers.Input(
             shape=(
@@ -228,6 +293,12 @@ class StreamTest(tf.test.TestCase, parameterized.TestCase):
           axis=time_dim)
       self.assertAllEqual(target, output_stream_np)
 
+    # validate name tag of model's state
+    expected_str = 'ExternalState'
+    self.assertAllEqual(
+        expected_str,
+        model_stream.inputs[1].name.split('/')[-1][:len(expected_str)])
+
   @parameterized.parameters('causal', 'same')
   def test_padding(self, padding):
     batch_size = 1
@@ -239,20 +310,69 @@ class StreamTest(tf.test.TestCase, parameterized.TestCase):
 
     # set it in train mode (in stream mode padding is not applied)
     net = stream.Stream(
-        mode=Modes.TRAINING,
+        mode=modes.Modes.TRAINING,
         cell=tf.keras.layers.Lambda(lambda x: x),
         ring_buffer_size_in_time_dim=kernel_size,
         pad_time_dim=padding)(inputs)
     model = tf.keras.Model(inputs, net)
 
-    np.random.seed(1)
+    test_utils.set_seed(1)
     input_signal = np.random.rand(batch_size, time_dim, feature_dim)
     outputs = model.predict(input_signal)
     self.assertAllEqual(outputs.shape,
                         [batch_size, time_dim + kernel_size - 1, feature_dim])
 
-  @parameterized.parameters(conv_model, conv_model_no_stream_wrapper)
-  def test_stream_strided_convolution(self, get_model):
+  def test_strided_conv_alignment(self):
+    kernel_size = 4
+    strides = 2
+    inputs = tf.keras.layers.Input(shape=(None, 1))
+    net = inputs
+    net = stream.Stream(
+        cell=tf.keras.layers.Conv1D(
+            filters=1,
+            kernel_size=kernel_size,
+            strides=strides,
+            padding='valid',
+            kernel_initializer='ones'),
+        use_one_step=False,
+        pad_time_dim='causal')(
+            net)
+    model = tf.keras.Model(inputs=inputs, outputs=net)
+
+    input_signal = np.arange(1, 5)  # [1, 2, 3, 4]
+    # Sanity check for the test itself: We only care about the case when input
+    # length is a multiple of strides. If not, streaming is not meaningful.
+    assert len(input_signal) % strides == 0
+    input_signal = input_signal[None, :, None]
+    output_signal = model.predict(input_signal)
+    outputs = output_signal[0, :, 0]
+
+    # Make sure causal conv is right-aligned, so that the most recent samples
+    # are never ignored. Thus we want:
+    #           1  2  3  4
+    # -> [0  0] 1  2  3  4  (padding)
+    # ->           3    10  (conv with kernel of ones: 3=0+0+1+2, 10=1+2+3+4)
+    # Note that this is different from tf.keras.layersConv1D(..., 'causal'),
+    # which will pad 3 zeroes on the left and produce [1(=0+0+0+1), 6(=0+1+2+3)]
+    # instead. The latter is less ideal, since it pads an extra zero and ignores
+    # the last (and hence most recent) valid sample "4".
+    self.assertAllEqual(outputs, [3, 10])
+
+  @parameterized.named_parameters(
+      {
+          'testcase_name': 'model with stream wrapper on Conv1D',
+          'get_model': conv_model,
+          'conv_cell': tf.keras.layers.Conv1D
+      }, {
+          'testcase_name': 'model with stream wrapper on SeparableConv1D',
+          'get_model': conv_model,
+          'conv_cell': tf.keras.layers.SeparableConv1D
+      }, {
+          'testcase_name': 'model without stream wrapper on Conv1D',
+          'get_model': conv_model_no_stream_wrapper,
+          'conv_cell': tf.keras.layers.Conv1D
+      })
+  def test_stream_strided_convolution(self, get_model, conv_cell):
     # Test streaming convolutional layers with striding, dilation.
     cnn_filters = [1, 1, 1, 1]
     cnn_kernel_size = [3, 3, 3, 3]
@@ -268,30 +388,55 @@ class StreamTest(tf.test.TestCase, parameterized.TestCase):
     inp_audio = np.cos((2.0 * np.pi / params.desired_samples) * frequency *
                        x) + np.random.rand(1, params.desired_samples) * 0.5
 
+    if conv_cell == tf.keras.layers.SeparableConv1D:
+      kwargs = dict(
+          depthwise_initializer=tf.keras.initializers.GlorotUniform(seed=123),
+          pointwise_initializer=tf.keras.initializers.GlorotUniform(seed=456))
+    else:
+      kwargs = dict(
+          kernel_initializer=tf.keras.initializers.GlorotUniform(seed=123))
+
+    # Prepare Keras native model.
+    model_native = conv_model_keras_native(params, conv_cell, cnn_filters,
+                                           cnn_kernel_size, cnn_act,
+                                           cnn_dilation_rate, cnn_strides,
+                                           cnn_use_bias, **kwargs)
+    model_native.summary()
+
     # prepare non stream model
-    model = get_model(params, cnn_filters, cnn_kernel_size, cnn_act,
-                      cnn_dilation_rate, cnn_strides, cnn_use_bias)
+    model = get_model(params, conv_cell, cnn_filters, cnn_kernel_size,
+                      cnn_act, cnn_dilation_rate, cnn_strides, cnn_use_bias,
+                      **kwargs)
     model.summary()
 
     # prepare streaming model
     model_stream = utils.to_streaming_inference(
-        model, params, Modes.STREAM_INTERNAL_STATE_INFERENCE)
+        model, params, modes.Modes.STREAM_INTERNAL_STATE_INFERENCE)
     model_stream.summary()
 
     # run inference
     non_stream_out = model.predict(inp_audio)
+    native_out = model_native.predict(inp_audio)
     stream_out = test.run_stream_inference(params, model_stream, inp_audio)
 
     # normalize output data and compare them
     channel = 0
     non_stream_out = non_stream_out[0, :, channel]
+    native_out = native_out[0, :, channel]
     stream_out = stream_out[0, :, channel]
 
     min_len = min(stream_out.shape[0], non_stream_out.shape[0])
     stream_out = stream_out[0:min_len]
+    native_out = native_out[0:min_len]
     non_stream_out = non_stream_out[0:min_len]
-    self.assertAllEqual(non_stream_out.shape, (42,))
-    self.assertAllClose(stream_out, non_stream_out)
+    self.assertAllEqual(non_stream_out.shape,
+                        (params.desired_samples / np.prod(cnn_strides),))
+
+    with self.subTest(name='stream_vs_non_stream'):
+      self.assertAllClose(stream_out, non_stream_out)
+
+    with self.subTest(name='non_stream_vs_native'):
+      self.assertAllClose(non_stream_out, native_out)
 
 
 if __name__ == '__main__':

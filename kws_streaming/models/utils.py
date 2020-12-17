@@ -18,9 +18,14 @@
 
 import ast
 import os.path
+from typing import Sequence
+
 from kws_streaming.layers import modes
 from kws_streaming.layers.compat import tf
 from kws_streaming.layers.compat import tf1
+from kws_streaming.models import model_flags
+from kws_streaming.models import model_params
+from kws_streaming.models import models as kws_models
 # pylint: disable=g-direct-tensorflow-import
 from tensorflow.python.keras import models
 from tensorflow.python.keras.engine import functional
@@ -119,7 +124,7 @@ def _clone_model(model, input_tensors):
       newly_created_input_layer = input_tensor._keras_history.layer
       new_input_layers[original_input_layer] = newly_created_input_layer
 
-  (model_config, created_layers) = models._clone_layers_and_model_config(
+  model_config, created_layers = models._clone_layers_and_model_config(
       model, new_input_layers, models._clone_layer)
   # pylint: enable=protected-access
 
@@ -201,6 +206,21 @@ def _copy_weights(new_model, model):
   return new_model
 
 
+def _flatten_nested_sequence(sequence):
+  """Returns a flattened list of sequence's elements."""
+  if not isinstance(sequence, Sequence):
+    return [sequence]
+  result = []
+  for value in sequence:
+    result.extend(_flatten_nested_sequence(value))
+  return result
+
+
+def _get_state_shapes(model_states):
+  """Converts a nested list of states in to a flat list of their shapes."""
+  return [state.shape for state in _flatten_nested_sequence(model_states)]
+
+
 def convert_to_inference_model(model, input_tensors, mode):
   """Convert functional `Model` instance to a streaming inference.
 
@@ -249,6 +269,8 @@ def convert_to_inference_model(model, input_tensors, mode):
     all_inputs = new_model.inputs + input_states
     all_outputs = new_model.outputs + output_states
     new_streaming_model = tf.keras.Model(all_inputs, all_outputs)
+    new_streaming_model.input_shapes = _get_state_shapes(all_inputs)
+    new_streaming_model.output_shapes = _get_state_shapes(all_outputs)
 
     # inference streaming model with external states
     # has the same number of weights with
@@ -398,3 +420,37 @@ def next_power_of_two(x):
     Next largest power of two integer.
   """
   return 1 if x == 0 else 2**(int(x) - 1).bit_length()
+
+
+def get_model_with_default_params(model_name, mode=None):
+  """Creates a model with the params specified in HOTWORD_MODEL_PARAMS."""
+  if model_name not in model_params.HOTWORD_MODEL_PARAMS:
+    raise KeyError(
+        "Expected 'model_name' to be one of "
+        f"{model_params.HOTWORD_MODEL_PARAMS.keys} but got '{model_name}'.")
+  params = model_params.HOTWORD_MODEL_PARAMS[model_name]
+  params = model_flags.update_flags(params)
+  model = kws_models.MODELS[params.model_name](params)
+  if mode is not None:
+    model = to_streaming_inference(model, flags=params, mode=mode)
+  return model
+
+
+def traverse_graph(prev_layer, layers):
+  """Traverse keras sequential graph."""
+  for layer in layers:
+    if isinstance(layer, (tf.keras.Sequential, tf.keras.Model)):
+      prev_layer = traverse_graph(prev_layer, layer.layers)
+    else:
+      prev_layer = layer(prev_layer)
+  return prev_layer
+
+
+def sequential_to_functional(model):
+  """Converts keras sequential model to functional one."""
+  input_layer = tf.keras.Input(
+      batch_input_shape=model.layers[0].input_shape[0])
+  prev_layer = input_layer
+  prev_layer = traverse_graph(prev_layer, model.layers[1:])
+  func_model = tf.keras.Model([input_layer], [prev_layer])
+  return func_model

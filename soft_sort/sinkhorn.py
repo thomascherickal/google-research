@@ -30,7 +30,11 @@ import tensorflow.compat.v2 as tf
 
 
 def center(cost, f, g):
-  return cost - f[:, :, tf.newaxis] - g[:, tf.newaxis, :]
+  if f.shape.rank == 2:
+    return cost - f[:, :, tf.newaxis] - g[:, tf.newaxis, :]
+  elif f.shape.rank == 3:
+    return cost[:, :, :, tf.newaxis] - (
+        f[:, :, tf.newaxis, :] + g[:, tf.newaxis, :, :])
 
 
 def softmin(cost, f, g, eps, axis):
@@ -39,28 +43,39 @@ def softmin(cost, f, g, eps, axis):
 
 def error(cost, f, g, eps, b):
   b_target = tf.math.reduce_sum(transport(cost, f, g, eps), axis=1)
-  return tf.reduce_max(tf.abs(b_target - b) / b, axis=None)
+  return tf.reduce_max((tf.abs(b_target - b) / b)[:])
 
 
 def transport(cost, f, g, eps):
   return tf.math.exp(-center(cost, f, g) / eps)
 
 
-def cost_fn(
-    x, y, power):
+def cost_fn(x, y,
+            power):
   """A transport cost in the form |x-y|^p and its derivative."""
-  xy_difference = x[:, :, tf.newaxis] - y[:, tf.newaxis, :]
-  if power == 1.0:
-    cost = tf.math.abs(xy_difference)
-    derivative = tf.math.sign(xy_difference)
-  elif power == 2.0:
-    cost = xy_difference ** 2.0
-    derivative = 2.0 * xy_difference
-  else:
-    abs_diff = tf.math.abs(xy_difference)
-    cost = abs_diff ** power
-    derivative = power * tf.math.sign(xy_difference) * abs_diff ** (power - 1.0)
-  return cost, derivative
+  # Check if data is 1D.
+  if x.shape.rank == 2 and y.shape.rank == 2:
+    # If that is the case, it is convenient to use pairwise difference matrix.
+    xy_difference = x[:, :, tf.newaxis] - y[:, tf.newaxis, :]
+    if power == 1.0:
+      cost = tf.math.abs(xy_difference)
+      derivative = tf.math.sign(xy_difference)
+    elif power == 2.0:
+      cost = xy_difference**2.0
+      derivative = 2.0 * xy_difference
+    else:
+      abs_diff = tf.math.abs(xy_difference)
+      cost = abs_diff**power
+      derivative = power * tf.math.sign(xy_difference) * abs_diff**(power - 1.0)
+    return cost, derivative
+  # Otherwise data is high dimensional, in form [batch,n,d]. L2 distance used.
+  elif x.shape.rank == 3 and y.shape.rank == 3:
+    x2 = tf.reduce_sum(x**2, axis=2)
+    y2 = tf.reduce_sum(y**2, axis=2)
+    cost = (x2[:, :, tf.newaxis] + y2[:, tf.newaxis, :] -
+            tf.matmul(x, y, transpose_b=True))**(power / 2)
+    derivative = None
+    return cost, derivative
 
 
 @gin.configurable
@@ -78,21 +93,22 @@ def sinkhorn_iterations(x,
   """Runs the Sinkhorn's algorithm from (x, a) to (y, b).
 
   Args:
-   x: Tensor<float>[batch, n]: the input point clouds.
-   y: Tensor<float>[batch, m]: the target point clouds.
-   a: Tensor<float>[batch, n]: the weight of each input point. The sum of all
-    elements of b must match that of a to converge.
-   b: Tensor<float>[batch, m]: the weight of each target point. The sum of all
-    elements of b must match that of a to converge.
+   x: Tensor<float>[batch, n, d]: the input point clouds.
+   y: Tensor<float>[batch, m, d]: the target point clouds.
+   a: Tensor<float>[batch, n, q]: weights of each input point across batch. Note
+     that q possible variants can be considered (for parallelism).
+     Sums along axis 1 must match that of b to converge.
+   b: Tensor<float>[batch, m, q]: weights of each input point across batch. As
+     with a, q possible variants of weights can be considered.
    power: (float) the power of the distance for the cost function.
    epsilon: (float) the level of entropic regularization wanted.
    epsilon_0: (float) the initial level of entropic regularization.
    epsilon_decay: (float) a multiplicative factor applied at each iteration
-    until reaching the epsilon value.
+     until reaching the epsilon value.
    threshold: (float) the relative threshold on the Sinkhorn error to stop the
-    Sinkhorn iterations.
+     Sinkhorn iterations.
    inner_num_iter: (int32) the Sinkhorn error is not recomputed at each
-    iteration but every inner_num_iter instead to avoid computational overhead.
+     iteration but every inner_num_iter instead to avoid computational overhead.
    max_iterations: (int32) the maximum number of Sinkhorn iterations.
 
   Returns:
@@ -122,7 +138,8 @@ def sinkhorn_iterations(x,
     ])
 
   f, g, eps, iterations = tf.while_loop(
-      cond_fn, body_fn, [
+      cond_fn,
+      body_fn, [
           tf.zeros_like(loga),
           tf.zeros_like(logb),
           tf.cast(epsilon_0, dtype=x.dtype),
@@ -199,10 +216,7 @@ def transport_implicit_gradients(derivative_cost,
   return [jac_x_p_transpose(d_p), jac_b_p_transpose(d_p)]
 
 
-def autodiff_sinkhorn(x,
-                      y,
-                      a,
-                      b,
+def autodiff_sinkhorn(x, y, a, b,
                       **kwargs):
   """A Sinkhorn function that returns the transportation matrix.
 
@@ -210,40 +224,38 @@ def autodiff_sinkhorn(x,
   Sinkhorn iterations.
 
   Args:
-   x: the input batch of 1D points clouds
-   y: the target batch 1D points clouds.
-   a: the intput weight of each point in the input point cloud. The sum of all
-    elements of b must match that of a to converge.
-   b: the target weight of each point in the target point cloud. The sum of all
-    elements of b must match that of a to converge.
+   x: [N, n, d] the input batch of points clouds
+   y: [N, m, d] the target batch points clouds.
+   a: [N, n, q] q probability weight vectors for the input point cloud. The sum
+     of all elements of b along axis 1 must match that of a.
+   b: [N, m, q] q probability weight vectors for the target point cloud. The sum
+     of all elements of b along axis 1 must match that of a.
    **kwargs: additional parameters passed to the sinkhorn algorithm. See
-    sinkhorn_iterations for more details.
+     sinkhorn_iterations for more details.
 
   Returns:
-   A tf.Tensor representing the optimal transport matrix.
+   A tf.Tensor representing the optimal transport matrix and the regularized OT
+   cost.
   """
   f, g, eps, cost, _, _ = sinkhorn_iterations(x, y, a, b, **kwargs)
   return transport(cost, f, g, eps)
 
 
-def implicit_sinkhorn(x,
-                      y,
-                      a,
-                      b,
+def implicit_sinkhorn(x, y, a, b,
                       **kwargs):
   """A Sinkhorn function using the implicit function theorem.
 
-  That is to say using the the differentiating optimality confiditions.
+  That is to say differentiating optimality confiditions to recover Jacobians.
 
   Args:
    x: the input batch of 1D points clouds
    y: the target batch 1D points clouds.
    a: the intput weight of each point in the input point cloud. The sum of all
-    elements of b must match that of a to converge.
+     elements of b must match that of a to converge.
    b: the target weight of each point in the target point cloud. The sum of all
-    elements of b must match that of a to converge.
+     elements of b must match that of a to converge.
    **kwargs: additional parameters passed to the sinkhorn algorithm. See
-    sinkhorn_iterations for more details.
+     sinkhorn_iterations for more details.
 
   Returns:
    A tf.Tensor representing the optimal transport matrix.
@@ -284,23 +296,60 @@ def sinkhorn(x,
   Sinkhorn iterations.
 
   Args:
-   x: the input batch of 1D points clouds
-   y: the target batch 1D points clouds.
+   x: the input batch of points clouds
+   y: the target batch points clouds.
    a: the intput weight of each point in the input point cloud. The sum of all
-    elements of b must match that of a to converge.
+     elements of b must match that of a to converge.
    b: the target weight of each point in the target point cloud. The sum of all
-    elements of b must match that of a to converge.
+     elements of b must match that of a to converge.
    implicit: whether to run the autodiff version of the backprop or the implicit
-    computation of the gradient. The implicit version is more efficient in terms
-    of both speed and memory, but might be less stable numerically. It requires
-    high-accuracy in the computation of the optimal transport itself.
+     computation of the gradient. The implicit version is more efficient in
+     terms of both speed and memory, but might be less stable numerically. It
+     requires high-accuracy in the computation of the optimal transport itself.
    **kwargs: additional parameters passed to the sinkhorn algorithm. See
-    sinkhorn_iterations for more details.
+     sinkhorn_iterations for more details.
 
   Returns:
    A tf.Tensor representing the optimal transport matrix.
   """
   if implicit:
-    return implicit_sinkhorn(x, y, a, b, **kwargs)
+    if x.shape.rank == 2:
+      return implicit_sinkhorn(x, y, a, b, **kwargs)
+    else:
+      raise ValueError('`Implicit` not yet implemented for multivariate data')
   return autodiff_sinkhorn(x, y, a, b, **kwargs)
 
+
+def sinkhorn_divergence(x,
+                        y,
+                        a,
+                        b,
+                        only_x_varies = False,
+                        **kwargs):
+  """A simple implementation of the Sinkhorn divergence.
+
+  This function back-propagates through the computational graph defined by the
+  Sinkhorn iterations.
+
+  Args:
+   x: [N,n,d] the input batch of multivariate (dimension d) points clouds
+   y: [N,m,d] the input batch of multivariate (dimension d) points clouds
+   a: [N,n] probability weights per batch
+   b: [N,n] probability weights per batch
+   only_x_varies: <bool> if only x varies, that flag should be set to True,
+     in order to avoid computing the divergence between y and itself.
+   **kwargs: additional parameters passed to the sinkhorn algorithm. See
+     sinkhorn_iterations for more details.
+
+  Returns:
+   A tf.Tensor representing the optimal transport matrix.
+  """
+  f_xy, g_xy = sinkhorn_iterations(x, y, a, b, **kwargs)[:2]
+  f_xx, g_xx = sinkhorn_iterations(x, x, a, a, **kwargs)[:2]
+  if only_x_varies:
+    return tf.reduce_sum((f_xy - 0.5 * f_xx - 0.5 * g_xx) * a +
+                         g_xy * b, axis=1)
+  else:
+    f_yy, g_yy = sinkhorn_iterations(y, y, b, b, **kwargs)[:2]
+    return (tf.reduce_sum((f_xy - 0.5 * f_xx - 0.5 * g_xx) * a, axis=1) +
+            tf.reduce_sum((g_xy - 0.5 * f_yy - 0.5 * g_yy) * b, axis=1))

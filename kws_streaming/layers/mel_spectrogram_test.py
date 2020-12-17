@@ -17,14 +17,14 @@
 
 import numpy as np
 from kws_streaming.layers import mel_spectrogram
+from kws_streaming.layers import modes
+from kws_streaming.layers import test_utils
 from kws_streaming.layers.compat import tf
 from kws_streaming.layers.compat import tf1
-from kws_streaming.layers.modes import Modes
-import kws_streaming.layers.test_utils as tu
 tf1.disable_eager_execution()
 
 
-class MelSpectrogramTest(tu.TestBase):
+class MelSpectrogramTest(test_utils.TestBase):
 
   def test_tf_vs_tf_direct(self):
     # Compare TF implementation of Mel (based on FFT)
@@ -36,7 +36,7 @@ class MelSpectrogramTest(tu.TestBase):
     sample_rate = 16000.0
     batch_size = 1
 
-    np.random.seed(1)
+    test_utils.set_seed(1)
 
     # generate input data
     frame = np.random.rand(batch_size, feature_size)
@@ -45,7 +45,7 @@ class MelSpectrogramTest(tu.TestBase):
     input1 = tf.keras.layers.Input(
         shape=(feature_size,), batch_size=batch_size, dtype=tf.float32)
     mel_spectrum = mel_spectrogram.MelSpectrogram(
-        mode=Modes.NON_STREAM_INFERENCE,
+        mode=modes.Modes.NON_STREAM_INFERENCE,
         use_tf=True,
         num_mel_bins=num_mel_bins,
         lower_edge_hertz=lower_edge_hertz,
@@ -60,7 +60,7 @@ class MelSpectrogramTest(tu.TestBase):
     input2 = tf.keras.layers.Input(
         shape=(feature_size,), batch_size=batch_size, dtype=tf.float32)
     mel_spectrum_direct = mel_spectrogram.MelSpectrogram(
-        mode=Modes.STREAM_EXTERNAL_STATE_INFERENCE,
+        mode=modes.Modes.STREAM_EXTERNAL_STATE_INFERENCE,
         use_tf=False,
         num_mel_bins=num_mel_bins,
         lower_edge_hertz=lower_edge_hertz,

@@ -14,12 +14,13 @@
 # limitations under the License.
 
 """Test utility functions."""
+
 import os
 from absl import logging
 import numpy as np
 import tensorflow.compat.v1 as tf
 import kws_streaming.data.input_data as input_data
-from kws_streaming.layers.modes import Modes
+from kws_streaming.layers import modes
 from kws_streaming.models import models
 from kws_streaming.models import utils
 
@@ -53,6 +54,90 @@ def run_stream_inference(flags, model_stream, inp_audio):
     start = end
     end = start + step
   return stream_out
+
+
+def run_stream_inference_classification(flags, model_stream, inp_audio):
+  """Runs streaming inference classification with tf (with internal state).
+
+  It is useful for testing streaming classification
+  Args:
+    flags: model and data settings
+    model_stream: tf model in streaming mode
+    inp_audio: input audio data
+  Returns:
+    last output
+  """
+
+  stream_step_size = flags.window_stride_samples * flags.data_stride
+  start = 0
+  end = stream_step_size
+  while end <= inp_audio.shape[1]:
+    # get overlapped audio sequence
+    stream_update = inp_audio[:, start:end]
+
+    # update indexes of streamed updates
+    start = end
+    end += stream_step_size
+
+    # classification result of a current frame
+    stream_output_prediction = model_stream.predict(stream_update)
+
+  return stream_output_prediction
+
+
+def run_stream_inference_classification_tflite(flags, interpreter, inp_audio,
+                                               input_states):
+  """Runs streaming inference classification with tflite (external state).
+
+  It is useful for testing streaming classification
+  Args:
+    flags: model and data settings
+    interpreter: tf lite interpreter in streaming mode
+    inp_audio: input audio data
+    input_states: input states
+  Returns:
+    last output
+  """
+
+  input_details = interpreter.get_input_details()
+  output_details = interpreter.get_output_details()
+
+  if len(input_details) != len(output_details):
+    raise ValueError('Number of inputs should be equal to the number of outputs'
+                     'for the case of streaming model with external state')
+
+  stream_step_size = flags.window_stride_samples * flags.data_stride
+  start = 0
+  end = stream_step_size
+  while end <= inp_audio.shape[1]:
+    stream_update = inp_audio[:, start:end]
+    stream_update = stream_update.astype(np.float32)
+
+    # update indexes of streamed updates
+    start = end
+    end += stream_step_size
+
+    # set input audio data (by default input data at index 0)
+    interpreter.set_tensor(input_details[0]['index'], stream_update)
+
+    # set input states (index 1...)
+    for s in range(1, len(input_details)):
+      interpreter.set_tensor(input_details[s]['index'], input_states[s])
+
+    # run inference
+    interpreter.invoke()
+
+    # get output: classification
+    out_tflite = interpreter.get_tensor(output_details[0]['index'])
+
+    # get output states and set it back to input states
+    # which will be fed in the next inference cycle
+    for s in range(1, len(input_details)):
+      # The function `get_tensor()` returns a copy of the tensor data.
+      # Use `tensor()` in order to get a pointer to the tensor.
+      input_states[s] = interpreter.get_tensor(output_details[s]['index'])
+
+  return out_tflite
 
 
 def tf_non_stream_model_accuracy(
@@ -171,7 +256,7 @@ def tf_stream_state_internal_model_accuracy(
   model.load_weights(weights_path).expect_partial()
 
   model_stream = utils.to_streaming_inference(
-      model, flags, Modes.STREAM_INTERNAL_STATE_INFERENCE)
+      model, flags, modes.Modes.STREAM_INTERNAL_STATE_INFERENCE)
 
   total_accuracy = 0.0
   count = 0.0
@@ -180,19 +265,9 @@ def tf_stream_state_internal_model_accuracy(
         inference_batch_size, i, flags, 0.0, 0.0, 0, 'testing', 0.0, 0.0, sess)
 
     if flags.preprocess == 'raw':
-      start = 0
-      end = flags.window_stride_samples
-      while end <= test_fingerprints.shape[1]:
-        # get overlapped audio sequence
-        stream_update = test_fingerprints[:, start:end]
-
-        # classification result of a current frame
-        stream_output_prediction = model_stream.predict(stream_update)
-        stream_output_arg = np.argmax(stream_output_prediction)
-
-        # update indexes of streamed updates
-        start = end
-        end = start + flags.window_stride_samples
+      stream_output_prediction = run_stream_inference_classification(
+          flags, model_stream, test_fingerprints)
+      stream_output_arg = np.argmax(stream_output_prediction)
     else:
       # iterate over frames
       for t in range(test_fingerprints.shape[1]):
@@ -277,7 +352,7 @@ def tf_stream_state_external_model_accuracy(
   weights_path = os.path.join(flags.train_dir, weights_name)
   model.load_weights(weights_path).expect_partial()
   model_stream = utils.to_streaming_inference(
-      model, flags, Modes.STREAM_EXTERNAL_STATE_INFERENCE)
+      model, flags, modes.Modes.STREAM_EXTERNAL_STATE_INFERENCE)
 
   logging.info('tf stream model state external with reset_state %d',
                reset_state)
@@ -432,37 +507,9 @@ def tflite_stream_state_external_model_accuracy(
         inputs[s] = np.zeros(input_details[s]['shape'], dtype=np.float32)
 
     if flags.preprocess == 'raw':
-      start = 0
-      end = flags.window_stride_samples
-      while end <= test_fingerprints.shape[1]:
-        stream_update = test_fingerprints[:, start:end]
-        stream_update = stream_update.astype(np.float32)
-
-        # update indexes of streamed updates
-        start = end
-        end = start + flags.window_stride_samples
-
-        # set input audio data (by default input data at index 0)
-        interpreter.set_tensor(input_details[0]['index'], stream_update)
-
-        # set input states (index 1...)
-        for s in range(1, len(input_details)):
-          interpreter.set_tensor(input_details[s]['index'], inputs[s])
-
-        # run inference
-        interpreter.invoke()
-
-        # get output: classification
-        out_tflite = interpreter.get_tensor(output_details[0]['index'])
-
-        # get output states and set it back to input states
-        # which will be fed in the next inference cycle
-        for s in range(1, len(input_details)):
-          # The function `get_tensor()` returns a copy of the tensor data.
-          # Use `tensor()` in order to get a pointer to the tensor.
-          inputs[s] = interpreter.get_tensor(output_details[s]['index'])
-
-        out_tflite_argmax = np.argmax(out_tflite)
+      out_tflite = run_stream_inference_classification_tflite(
+          flags, interpreter, test_fingerprints, inputs)
+      out_tflite_argmax = np.argmax(out_tflite)
     else:
       for t in range(test_fingerprints.shape[1]):
         # get new frame from stream of data
